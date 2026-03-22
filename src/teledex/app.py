@@ -32,10 +32,10 @@ HELP_TEXT = """teledex 可用命令：
 _PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 0.8
 _PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
-_PREVIEW_STREAM_STEP_CHARS = 24
-_PREVIEW_MAX_CHARS = 1200
-_PREVIEW_DRAIN_INTERVAL_SECONDS = 0.06
-_PREVIEW_DRAIN_TIMEOUT_SECONDS = 3.0
+_PREVIEW_STREAM_STEP_CHARS = 1
+_PREVIEW_MAX_CHARS = 320
+_PREVIEW_STREAM_INTERVAL_SECONDS = 0.04
+_PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
 
 
 @dataclass(slots=True)
@@ -73,6 +73,7 @@ class LivePreviewState:
         self._frame_index = 0
         self._max_chars = max_chars
         self._stream_step_chars = max(1, stream_step_chars)
+        self._in_progress = True
         self._lock = threading.RLock()
 
     def update_status(self, text: str) -> None:
@@ -94,6 +95,7 @@ class LivePreviewState:
             if self._visible_chars == 0:
                 self._visible_chars = min(self._stream_step_chars, len(self._target_text))
             self._status_text = "正在输出..."
+            self._in_progress = True
 
     def advance(self) -> str:
         with self._lock:
@@ -117,14 +119,27 @@ class LivePreviewState:
         with self._lock:
             return self._target_text
 
+    def complete(self) -> str:
+        with self._lock:
+            self._visible_chars = len(self._target_text)
+            self._status_text = "已完成"
+            self._in_progress = False
+            return self._render_locked()
+
     def _render_locked(self) -> str:
-        marker = _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
-        if self._target_text:
-            body = self._target_text[: self._visible_chars]
-        else:
-            body = self._status_text
-        body = _truncate_preview_text(body, self._max_chars)
-        return f"{marker} {body}".strip()
+        marker = (
+            _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
+            if self._in_progress
+            else _PREVIEW_HEARTBEAT_FRAMES[-1]
+        )
+        status_line = f"{marker} {self._status_text}".strip()
+        if not self._target_text:
+            return status_line
+
+        body = _truncate_preview_text(self._target_text[: self._visible_chars], self._max_chars)
+        if not body:
+            return status_line
+        return f"{status_line}\n\n{body}"
 
 
 def _truncate_preview_text(text: str, max_chars: int) -> str:
@@ -592,7 +607,12 @@ class TeledexApp:
                 self._update_preview(active_run, text, prefer_html=True)
                 last_preview_text = text
 
-            stop_event.wait(_PREVIEW_HEARTBEAT_INTERVAL_SECONDS)
+            wait_seconds = (
+                _PREVIEW_STREAM_INTERVAL_SECONDS
+                if preview_state.has_pending_stream()
+                else _PREVIEW_HEARTBEAT_INTERVAL_SECONDS
+            )
+            stop_event.wait(wait_seconds)
 
     def _stop_preview_loop(
         self,
@@ -611,7 +631,7 @@ class TeledexApp:
         deadline = time.monotonic() + _PREVIEW_DRAIN_TIMEOUT_SECONDS
         while preview_state.has_pending_stream() and time.monotonic() < deadline:
             self._update_preview(active_run, preview_state.advance(), prefer_html=True)
-            time.sleep(_PREVIEW_DRAIN_INTERVAL_SECONDS)
+            time.sleep(_PREVIEW_STREAM_INTERVAL_SECONDS)
 
     def _update_preview(
         self,
@@ -666,15 +686,17 @@ class TeledexApp:
 
     def _build_inline_result(self, text: str) -> tuple[str, str | None]:
         cleaned = strip_citations(text).strip()
-        html_text = markdown_to_telegram_html(cleaned)
+        final_markdown = f"**● 已完成**\n\n{cleaned}" if cleaned else "**● 已完成**"
+        html_text = markdown_to_telegram_html(final_markdown)
         if html_text and len(html_text) <= 3500:
             return html_text, "HTML"
 
         plain_limit = 3400
-        if len(cleaned) <= plain_limit:
-            return cleaned, None
+        plain_text = f"● 已完成\n\n{cleaned}" if cleaned else "● 已完成"
+        if len(plain_text) <= plain_limit:
+            return plain_text, None
         suffix = "\n\n[内容较长，已截断]"
-        truncated = cleaned[: plain_limit - len(suffix) - 3].rstrip() + "..." + suffix
+        truncated = plain_text[: plain_limit - len(suffix) - 3].rstrip() + "..." + suffix
         return truncated, None
 
     def _safe_send_chat_action(

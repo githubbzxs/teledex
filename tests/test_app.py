@@ -116,7 +116,8 @@ class AppMessagingTestCase(unittest.TestCase):
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["text"], "最终回复")
+        self.assertIn("● 已完成", str(calls[0]["text"]))
+        self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertEqual(calls[0]["parse_mode"], "HTML")
 
 
@@ -132,9 +133,15 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview = LivePreviewState(stream_step_chars=2)
         preview.update_stream_text("abcdef")
 
-        self.assertEqual(preview.render(), "○ ab")
-        self.assertEqual(preview.advance(), "● abcd")
-        self.assertEqual(preview.advance(), "○ abcdef")
+        self.assertEqual(preview.render(), "○ 正在输出...\n\nab")
+        self.assertEqual(preview.advance(), "● 正在输出...\n\nabcd")
+        self.assertEqual(preview.advance(), "○ 正在输出...\n\nabcdef")
+
+    def test_complete_keeps_final_status_line(self) -> None:
+        preview = LivePreviewState(stream_step_chars=2)
+        preview.update_stream_text("完成内容")
+
+        self.assertEqual(preview.complete(), "● 已完成\n\n完成内容")
 
 
 if __name__ == "__main__":
