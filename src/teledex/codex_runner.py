@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,6 +88,14 @@ class CodexRunner:
             )
         if event_type == "turn.started":
             return ParsedCodexEvent(status_text="正在思考...")
+        if event_type == "turn.completed":
+            return ParsedCodexEvent(status_text="正在整理回复...")
+        if event_type == "turn.failed":
+            message = str(payload.get("message") or "执行失败").strip()
+            return ParsedCodexEvent(status_text=message or "执行失败")
+        if event_type == "error":
+            message = str(payload.get("message") or "执行失败").strip()
+            return ParsedCodexEvent(status_text=message or "执行失败")
         if event_type.startswith("exec.command.") or event_type.startswith("patch."):
             return ParsedCodexEvent(status_text="正在调用工具...")
 
@@ -142,31 +151,29 @@ class CodexRunner:
         thread_id: str | None,
         output_file: Path,
     ) -> list[str]:
-        command: list[str] = [self.config.codex_bin, "exec"]
-        command.extend(
-            [
-                "--skip-git-repo-check",
-                "--json",
-                "--cd",
-                str(cwd),
-                "--output-last-message",
-                str(output_file),
-            ]
-        )
+        helper_path = Path(__file__).with_name("codex_app_server_exec.py").resolve()
+        command: list[str] = [
+            sys.executable,
+            "-u",
+            str(helper_path),
+            "--codex-bin",
+            self.config.codex_bin,
+            "--cwd",
+            str(cwd),
+            "--output-file",
+            str(output_file),
+            "--exec-mode",
+            self.config.codex_exec_mode,
+            "--prompt",
+            prompt,
+        ]
 
-        if self.config.codex_exec_mode == "full-auto":
-            command.append("--full-auto")
-        elif self.config.codex_exec_mode == "dangerous":
-            command.append("--dangerously-bypass-approvals-and-sandbox")
+        if thread_id:
+            command.extend(["--thread-id", thread_id])
 
         if self.config.codex_model:
             command.extend(["--model", self.config.codex_model])
 
         if self.config.codex_enable_search:
             command.append("--search")
-
-        if thread_id:
-            command.extend(["resume", thread_id, prompt])
-        else:
-            command.append(prompt)
         return command
