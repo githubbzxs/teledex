@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
-from .formatting import preview_text_for_agent_message, summarize_command
+from .formatting import summarize_command
 
 
 @dataclass(slots=True)
@@ -24,6 +24,7 @@ class CodexProcessHandle:
 @dataclass(slots=True)
 class ParsedCodexEvent:
     status_text: str | None = None
+    preview_text: str | None = None
     thread_id: str | None = None
     final_message: str | None = None
 
@@ -95,7 +96,7 @@ class CodexRunner:
             if item_type == "agent_message":
                 text = str(item.get("text", "")).strip()
                 return ParsedCodexEvent(
-                    status_text=preview_text_for_agent_message(text),
+                    preview_text=text or None,
                     final_message=text or None,
                 )
             if item_type == "command_execution":

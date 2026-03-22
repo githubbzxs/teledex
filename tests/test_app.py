@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from teledex.app import ActiveRun, IncomingMessage, TeledexApp
+from teledex.app import ActiveRun, IncomingMessage, LivePreviewState, TeledexApp
 from teledex.config import AppConfig
 from teledex.telegram_api import TelegramMessage
 
@@ -83,6 +83,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
+        self.assertTrue(str(calls[0]["text"]).startswith("○ "))
 
     def test_send_run_result_never_replies_to_preview_message(self) -> None:
         active_run = ActiveRun(
@@ -119,6 +120,23 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
         self.assertTrue(calls[0]["prefer_html"])
+
+
+class LivePreviewStateTestCase(unittest.TestCase):
+    def test_heartbeat_marker_toggles(self) -> None:
+        preview = LivePreviewState(initial_status="正在思考...")
+
+        self.assertEqual(preview.render(), "○ 正在思考...")
+        self.assertEqual(preview.advance(), "● 正在思考...")
+        self.assertEqual(preview.advance(), "○ 正在思考...")
+
+    def test_stream_text_reveals_incrementally(self) -> None:
+        preview = LivePreviewState(stream_step_chars=2)
+        preview.update_stream_text("abcdef")
+
+        self.assertEqual(preview.render(), "○ ab")
+        self.assertEqual(preview.advance(), "● abcd")
+        self.assertEqual(preview.advance(), "○ abcdef")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,12 @@ HELP_TEXT = """teledex 可用命令：
 
 直接发送普通文本，即可继续当前活跃会话。"""
 
+_PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
+_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 0.35
+_PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
+_PREVIEW_STREAM_STEP_CHARS = 24
+_PREVIEW_MAX_CHARS = 1200
+
 
 @dataclass(slots=True)
 class IncomingMessage:
@@ -50,6 +56,71 @@ class ActiveRun:
     preview_message_id: int | None = None
     process_handle: CodexProcessHandle | None = None
     stop_requested: bool = False
+
+
+class LivePreviewState:
+    def __init__(
+        self,
+        initial_status: str = "正在准备会话...",
+        max_chars: int = _PREVIEW_MAX_CHARS,
+        stream_step_chars: int = _PREVIEW_STREAM_STEP_CHARS,
+    ) -> None:
+        self._status_text = initial_status.strip() or "正在准备会话..."
+        self._target_text = ""
+        self._visible_chars = 0
+        self._frame_index = 0
+        self._max_chars = max_chars
+        self._stream_step_chars = max(1, stream_step_chars)
+        self._lock = threading.RLock()
+
+    def update_status(self, text: str) -> None:
+        normalized = text.strip()
+        if not normalized:
+            return
+        with self._lock:
+            self._status_text = normalized
+
+    def update_stream_text(self, text: str) -> None:
+        normalized = strip_citations(text).strip()
+        if not normalized:
+            return
+        with self._lock:
+            if normalized != self._target_text:
+                if not normalized.startswith(self._target_text):
+                    self._visible_chars = min(self._visible_chars, len(normalized))
+                self._target_text = normalized
+            if self._visible_chars == 0:
+                self._visible_chars = min(self._stream_step_chars, len(self._target_text))
+            self._status_text = "正在输出..."
+
+    def advance(self) -> str:
+        with self._lock:
+            self._frame_index = (self._frame_index + 1) % len(_PREVIEW_HEARTBEAT_FRAMES)
+            if self._target_text and self._visible_chars < len(self._target_text):
+                self._visible_chars = min(
+                    len(self._target_text),
+                    self._visible_chars + self._stream_step_chars,
+                )
+            return self._render_locked()
+
+    def render(self) -> str:
+        with self._lock:
+            return self._render_locked()
+
+    def _render_locked(self) -> str:
+        marker = _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
+        if self._target_text:
+            body = self._target_text[: self._visible_chars]
+        else:
+            body = self._status_text
+        body = _truncate_preview_text(body, self._max_chars)
+        return f"{marker} {body}".strip()
+
+
+def _truncate_preview_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
 
 
 class TeledexApp:
@@ -320,9 +391,10 @@ class TeledexApp:
             )
             return
 
+        preview_state = LivePreviewState()
         preview = self._safe_send_message(
             incoming.chat_id,
-            "正在准备会话...",
+            preview_state.render(),
             incoming.message_thread_id,
         )
 
@@ -348,15 +420,25 @@ class TeledexApp:
 
         worker = threading.Thread(
             target=self._execute_run,
-            args=(session, active_run),
+            args=(session, active_run, preview_state),
             daemon=True,
         )
         worker.start()
 
-    def _execute_run(self, session: SessionRecord, active_run: ActiveRun) -> None:
+    def _execute_run(
+        self,
+        session: SessionRecord,
+        active_run: ActiveRun,
+        preview_state: LivePreviewState,
+    ) -> None:
         final_message: str | None = None
-        last_preview_text = "正在准备会话..."
-        last_preview_at = 0.0
+        preview_stop_event = threading.Event()
+        preview_worker = threading.Thread(
+            target=self._run_preview_loop,
+            args=(active_run, preview_state, preview_stop_event),
+            daemon=True,
+        )
+        preview_worker.start()
         try:
             if session.bound_path is None:
                 raise RuntimeError("会话未绑定目录")
@@ -385,16 +467,10 @@ class TeledexApp:
                     self.storage.update_session_thread_id(session.id, parsed.thread_id)
                 if parsed.final_message:
                     final_message = parsed.final_message
+                if parsed.preview_text:
+                    preview_state.update_stream_text(parsed.preview_text)
                 if parsed.status_text:
-                    now = time.monotonic()
-                    if (
-                        parsed.status_text != last_preview_text
-                        and now - last_preview_at
-                        >= self.config.preview_update_interval_seconds
-                    ):
-                        self._update_preview(active_run, parsed.status_text)
-                        last_preview_text = parsed.status_text
-                        last_preview_at = now
+                    preview_state.update_status(parsed.status_text)
 
             return_code = handle.process.wait()
             if return_code != 0:
@@ -411,7 +487,8 @@ class TeledexApp:
             if not final_message:
                 final_message = "任务已完成，但没有捕获到最终回复。"
 
-            self._update_preview(active_run, "正在整理回复...")
+            preview_state.update_status("正在整理回复...")
+            self._stop_preview_loop(preview_stop_event, preview_worker)
             final_message = strip_citations(final_message)
             self._send_run_result(active_run, final_message)
             self.storage.finish_run(
@@ -421,7 +498,9 @@ class TeledexApp:
             )
             self.storage.update_session_status(session.id, "idle")
         except InterruptedError:
-            self._update_preview(active_run, "Stopped.")
+            preview_state.update_status("已停止")
+            self._stop_preview_loop(preview_stop_event, preview_worker)
+            self._update_preview(active_run, "已停止")
             self._safe_send_message(
                 active_run.chat_id,
                 f"会话 #{session.id} 的任务已停止。",
@@ -435,7 +514,9 @@ class TeledexApp:
             self.storage.update_session_status(session.id, "idle")
         except Exception as exc:
             self.logger.exception("执行会话 #%s 失败", session.id)
-            self._update_preview(active_run, "Failed.")
+            preview_state.update_status("执行失败")
+            self._stop_preview_loop(preview_stop_event, preview_worker)
+            self._update_preview(active_run, "执行失败")
             self._safe_send_message(
                 active_run.chat_id,
                 f"会话 #{session.id} 执行失败：{exc}",
@@ -448,6 +529,7 @@ class TeledexApp:
             )
             self.storage.update_session_status(session.id, "error")
         finally:
+            self._stop_preview_loop(preview_stop_event, preview_worker)
             if active_run.process_handle is not None:
                 try:
                     active_run.process_handle.output_file.unlink(missing_ok=True)
@@ -475,10 +557,63 @@ class TeledexApp:
             self.runner.terminate(handle)
         return True
 
-    def _update_preview(self, active_run: ActiveRun, text: str) -> None:
+    def _run_preview_loop(
+        self,
+        active_run: ActiveRun,
+        preview_state: LivePreviewState,
+        stop_event: threading.Event,
+    ) -> None:
+        last_preview_text = ""
+        last_typing_at = 0.0
+        while not stop_event.is_set():
+            now = time.monotonic()
+            if now - last_typing_at >= _PREVIEW_TYPING_INTERVAL_SECONDS:
+                self._safe_send_chat_action(
+                    active_run.chat_id,
+                    "typing",
+                    active_run.message_thread_id,
+                )
+                last_typing_at = now
+
+            text = preview_state.advance()
+            if text and text != last_preview_text:
+                self._update_preview(active_run, text, prefer_html=True)
+                last_preview_text = text
+
+            stop_event.wait(_PREVIEW_HEARTBEAT_INTERVAL_SECONDS)
+
+    def _stop_preview_loop(
+        self,
+        stop_event: threading.Event,
+        worker: threading.Thread,
+    ) -> None:
+        stop_event.set()
+        if worker.is_alive():
+            worker.join(timeout=1.5)
+
+    def _update_preview(
+        self,
+        active_run: ActiveRun,
+        text: str,
+        prefer_html: bool = False,
+    ) -> None:
         if active_run.preview_message_id is None:
             return
         try:
+            if prefer_html:
+                try:
+                    self.telegram.edit_message_text(
+                        chat_id=active_run.chat_id,
+                        message_id=active_run.preview_message_id,
+                        text=markdown_to_telegram_html(text),
+                        message_thread_id=active_run.message_thread_id,
+                        parse_mode="HTML",
+                    )
+                    return
+                except TelegramApiError as exc:
+                    if is_message_not_modified_error(exc):
+                        return
+                    self.logger.warning("HTML 预览更新失败，回退为纯文本：%s", exc)
             self.telegram.edit_message_text(
                 chat_id=active_run.chat_id,
                 message_id=active_run.preview_message_id,
@@ -497,6 +632,21 @@ class TeledexApp:
             active_run.message_thread_id,
             prefer_html=True,
         )
+
+    def _safe_send_chat_action(
+        self,
+        chat_id: int,
+        action: str,
+        message_thread_id: int | None,
+    ) -> None:
+        try:
+            self.telegram.send_chat_action(
+                chat_id=chat_id,
+                action=action,
+                message_thread_id=message_thread_id,
+            )
+        except TelegramApiError:
+            self.logger.debug("发送 Telegram chat action 失败", exc_info=True)
 
     def _safe_send_message(
         self,

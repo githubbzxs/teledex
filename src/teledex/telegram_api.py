@@ -87,6 +87,20 @@ class TelegramClient:
             payload["message_thread_id"] = message_thread_id
         self._call("editMessageText", payload)
 
+    def send_chat_action(
+        self,
+        chat_id: int,
+        action: str,
+        message_thread_id: int | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "action": action,
+        }
+        if message_thread_id is not None:
+            payload["message_thread_id"] = message_thread_id
+        self._call("sendChatAction", payload)
+
     def _call(
         self, method: str, payload: dict[str, Any] | None = None, timeout: int | None = None
     ) -> Any:
