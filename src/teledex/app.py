@@ -30,10 +30,12 @@ HELP_TEXT = """teledex 可用命令：
 直接发送普通文本，即可继续当前活跃会话。"""
 
 _PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
-_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 0.35
+_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 0.8
 _PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
 _PREVIEW_STREAM_STEP_CHARS = 24
 _PREVIEW_MAX_CHARS = 1200
+_PREVIEW_DRAIN_INTERVAL_SECONDS = 0.06
+_PREVIEW_DRAIN_TIMEOUT_SECONDS = 3.0
 
 
 @dataclass(slots=True)
@@ -106,6 +108,14 @@ class LivePreviewState:
     def render(self) -> str:
         with self._lock:
             return self._render_locked()
+
+    def has_pending_stream(self) -> bool:
+        with self._lock:
+            return bool(self._target_text) and self._visible_chars < len(self._target_text)
+
+    def target_text(self) -> str:
+        with self._lock:
+            return self._target_text
 
     def _render_locked(self) -> str:
         marker = _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
@@ -487,9 +497,11 @@ class TeledexApp:
             if not final_message:
                 final_message = "任务已完成，但没有捕获到最终回复。"
 
+            final_message = strip_citations(final_message)
+            preview_state.update_stream_text(final_message)
             preview_state.update_status("正在整理回复...")
             self._stop_preview_loop(preview_stop_event, preview_worker)
-            final_message = strip_citations(final_message)
+            self._drain_preview_stream(active_run, preview_state)
             self._send_run_result(active_run, final_message)
             self.storage.finish_run(
                 active_run.run_id,
@@ -591,47 +603,79 @@ class TeledexApp:
         if worker.is_alive():
             worker.join(timeout=1.5)
 
+    def _drain_preview_stream(
+        self,
+        active_run: ActiveRun,
+        preview_state: LivePreviewState,
+    ) -> None:
+        deadline = time.monotonic() + _PREVIEW_DRAIN_TIMEOUT_SECONDS
+        while preview_state.has_pending_stream() and time.monotonic() < deadline:
+            self._update_preview(active_run, preview_state.advance(), prefer_html=True)
+            time.sleep(_PREVIEW_DRAIN_INTERVAL_SECONDS)
+
     def _update_preview(
         self,
         active_run: ActiveRun,
         text: str,
         prefer_html: bool = False,
-    ) -> None:
+    ) -> bool:
+        if prefer_html:
+            rendered_html = markdown_to_telegram_html(text)
+            if rendered_html and self._edit_preview_message(
+                active_run,
+                rendered_html,
+                parse_mode="HTML",
+            ):
+                return True
+            return self._edit_preview_message(active_run, text)
+        return self._edit_preview_message(active_run, text)
+
+    def _edit_preview_message(
+        self,
+        active_run: ActiveRun,
+        text: str,
+        parse_mode: str | None = None,
+    ) -> bool:
         if active_run.preview_message_id is None:
-            return
+            return False
         try:
-            if prefer_html:
-                try:
-                    self.telegram.edit_message_text(
-                        chat_id=active_run.chat_id,
-                        message_id=active_run.preview_message_id,
-                        text=markdown_to_telegram_html(text),
-                        message_thread_id=active_run.message_thread_id,
-                        parse_mode="HTML",
-                    )
-                    return
-                except TelegramApiError as exc:
-                    if is_message_not_modified_error(exc):
-                        return
-                    self.logger.warning("HTML 预览更新失败，回退为纯文本：%s", exc)
             self.telegram.edit_message_text(
                 chat_id=active_run.chat_id,
                 message_id=active_run.preview_message_id,
                 text=text,
                 message_thread_id=active_run.message_thread_id,
+                parse_mode=parse_mode,
             )
+            return True
         except TelegramApiError as exc:
             if is_message_not_modified_error(exc):
-                return
+                return True
             self.logger.exception("更新预览消息失败")
+            return False
 
     def _send_run_result(self, active_run: ActiveRun, text: str) -> None:
-        self._send_long_message(
+        inline_text, parse_mode = self._build_inline_result(text)
+        if self._edit_preview_message(active_run, inline_text, parse_mode=parse_mode):
+            return
+        self._safe_send_message(
             active_run.chat_id,
-            text,
+            inline_text,
             active_run.message_thread_id,
-            prefer_html=True,
+            parse_mode=parse_mode,
         )
+
+    def _build_inline_result(self, text: str) -> tuple[str, str | None]:
+        cleaned = strip_citations(text).strip()
+        html_text = markdown_to_telegram_html(cleaned)
+        if html_text and len(html_text) <= 3500:
+            return html_text, "HTML"
+
+        plain_limit = 3400
+        if len(cleaned) <= plain_limit:
+            return cleaned, None
+        suffix = "\n\n[内容较长，已截断]"
+        truncated = cleaned[: plain_limit - len(suffix) - 3].rstrip() + "..." + suffix
+        return truncated, None
 
     def _safe_send_chat_action(
         self,

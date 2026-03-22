@@ -97,29 +97,27 @@ class AppMessagingTestCase(unittest.TestCase):
         )
         calls: list[dict[str, object]] = []
 
-        def fake_send_long_message(
-            chat_id: int,
+        def fake_edit_preview_message(
+            active_run: ActiveRun,
             text: str,
-            message_thread_id: int | None,
-            reply_to_message_id: int | None = None,
-            prefer_html: bool = False,
-        ) -> None:
+            parse_mode: str | None = None,
+        ) -> bool:
             calls.append(
                 {
-                    "chat_id": chat_id,
+                    "chat_id": active_run.chat_id,
                     "text": text,
-                    "message_thread_id": message_thread_id,
-                    "reply_to_message_id": reply_to_message_id,
-                    "prefer_html": prefer_html,
+                    "message_thread_id": active_run.message_thread_id,
+                    "parse_mode": parse_mode,
                 }
             )
+            return True
 
-        self.app._send_long_message = fake_send_long_message  # type: ignore[method-assign]
+        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(len(calls), 1)
-        self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertTrue(calls[0]["prefer_html"])
+        self.assertEqual(calls[0]["text"], "最终回复")
+        self.assertEqual(calls[0]["parse_mode"], "HTML")
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
