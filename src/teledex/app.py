@@ -30,7 +30,7 @@ HELP_TEXT = """teledex 可用命令：
 直接发送普通文本，即可继续当前活跃会话。"""
 
 _PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
-_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 0.8
+_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 0.6
 _PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
 _PREVIEW_STREAM_STEP_CHARS = 1
 _PREVIEW_MAX_CHARS = 320
@@ -132,14 +132,15 @@ class LivePreviewState:
             if self._in_progress
             else _PREVIEW_HEARTBEAT_FRAMES[-1]
         )
-        status_line = f"{marker} {self._status_text}".strip()
         if not self._target_text:
-            return status_line
+            return f"{marker} {self._status_text}".strip()
 
         body = _truncate_preview_text(self._target_text[: self._visible_chars], self._max_chars)
         if not body:
-            return status_line
-        return f"{status_line}\n\n{body}"
+            return f"{marker} {self._status_text}".strip()
+        if self._in_progress:
+            return f"{marker} {body}".strip()
+        return f"{marker} 已完成 {body}".strip()
 
 
 def _truncate_preview_text(text: str, max_chars: int) -> str:
@@ -686,13 +687,13 @@ class TeledexApp:
 
     def _build_inline_result(self, text: str) -> tuple[str, str | None]:
         cleaned = strip_citations(text).strip()
-        final_markdown = f"**● 已完成**\n\n{cleaned}" if cleaned else "**● 已完成**"
+        final_markdown = f"**● 已完成** {cleaned}" if cleaned else "**● 已完成**"
         html_text = markdown_to_telegram_html(final_markdown)
         if html_text and len(html_text) <= 3500:
             return html_text, "HTML"
 
         plain_limit = 3400
-        plain_text = f"● 已完成\n\n{cleaned}" if cleaned else "● 已完成"
+        plain_text = f"● 已完成 {cleaned}" if cleaned else "● 已完成"
         if len(plain_text) <= plain_limit:
             return plain_text, None
         suffix = "\n\n[内容较长，已截断]"

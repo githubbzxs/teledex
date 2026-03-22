@@ -133,15 +133,15 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview = LivePreviewState(stream_step_chars=2)
         preview.update_stream_text("abcdef")
 
-        self.assertEqual(preview.render(), "○ 正在输出...\n\nab")
-        self.assertEqual(preview.advance(), "● 正在输出...\n\nabcd")
-        self.assertEqual(preview.advance(), "○ 正在输出...\n\nabcdef")
+        self.assertEqual(preview.render(), "○ ab")
+        self.assertEqual(preview.advance(), "● abcd")
+        self.assertEqual(preview.advance(), "○ abcdef")
 
     def test_complete_keeps_final_status_line(self) -> None:
         preview = LivePreviewState(stream_step_chars=2)
         preview.update_stream_text("完成内容")
 
-        self.assertEqual(preview.complete(), "● 已完成\n\n完成内容")
+        self.assertEqual(preview.complete(), "● 已完成 完成内容")
 
 
 if __name__ == "__main__":
