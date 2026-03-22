@@ -1,0 +1,15 @@
+[Unit]
+Description=teledex Telegram Codex relay
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/teledex
+EnvironmentFile=/root/teledex/.env.local
+Environment=PYTHONPATH=/root/teledex/src
+ExecStart=/usr/bin/env python3 -m teledex
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

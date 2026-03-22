@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teledex"
+version = "0.1.0"
+description = "Telegram 到远端 Codex 会话的轻量中继器"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+teledex = "teledex.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
