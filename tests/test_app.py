@@ -83,7 +83,8 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertTrue(str(calls[0]["text"]).startswith("○ "))
+        self.assertTrue(str(calls[0]["text"]).startswith("思考时间：00:00"))
+        self.assertIn("statusline：○ 正在准备会话...", str(calls[0]["text"]))
 
     def test_send_run_result_never_replies_to_preview_message(self) -> None:
         active_run = ActiveRun(
@@ -125,23 +126,49 @@ class LivePreviewStateTestCase(unittest.TestCase):
     def test_heartbeat_marker_toggles(self) -> None:
         preview = LivePreviewState(initial_status="正在思考...")
 
-        self.assertEqual(preview.render(), "○ 正在思考...")
-        self.assertEqual(preview.advance(), "● 正在思考...")
-        self.assertEqual(preview.advance(), "○ 正在思考...")
+        self.assertEqual(preview.render(), "思考时间：00:00\n\nstatusline：○ 正在思考...")
+        self.assertEqual(preview.advance(), "思考时间：00:00\n\nstatusline：● 正在思考...")
+        self.assertEqual(preview.advance(), "思考时间：00:00\n\nstatusline：○ 正在思考...")
 
     def test_stream_text_reveals_incrementally(self) -> None:
         preview = LivePreviewState(stream_step_chars=2)
         preview.update_stream_text("abcdef")
 
-        self.assertEqual(preview.render(), "○ ab")
-        self.assertEqual(preview.advance(), "● abcd")
-        self.assertEqual(preview.advance(), "○ abcdef")
+        self.assertEqual(
+            preview.render(),
+            "思考时间：00:00\n\n输出预览：\nab\n\nstatusline：○ 正在输出...",
+        )
+        self.assertEqual(
+            preview.advance(),
+            "思考时间：00:00\n\n输出预览：\nabcd\n\nstatusline：● 正在输出...",
+        )
+        self.assertEqual(
+            preview.advance(),
+            "思考时间：00:00\n\n输出预览：\nabcdef\n\nstatusline：○ 正在输出...",
+        )
+
+    def test_commentary_history_appends_instead_of_replacing(self) -> None:
+        now = [0.0]
+        preview = LivePreviewState(now_func=lambda: now[0])
+
+        preview.update_commentary("msg_1", "先看目录")
+        preview.update_commentary("msg_2", "再检查配置")
+        now[0] = 5.0
+        preview.update_status("正在执行：pwd")
+
+        self.assertEqual(
+            preview.render(),
+            "思考时间：00:05\n\n思考过程：\n先看目录\n\n再检查配置\n\nstatusline：○ 正在执行：pwd",
+        )
 
     def test_complete_keeps_final_status_line(self) -> None:
         preview = LivePreviewState(stream_step_chars=2)
         preview.update_stream_text("完成内容")
 
-        self.assertEqual(preview.complete(), "● 已完成 完成内容")
+        self.assertEqual(
+            preview.complete(),
+            "思考时间：00:00\n\n输出预览：\n完成内容\n\nstatusline：● 已完成",
+        )
 
 
 if __name__ == "__main__":

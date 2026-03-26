@@ -275,7 +275,7 @@ def _resolve_thread_binding(result: dict[str, Any]) -> tuple[str, str | None]:
 def _map_notification(
     method: str,
     params: dict[str, Any],
-    latest_agent_message_by_id: dict[str, str],
+    latest_agent_message_by_id: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     if method == "turn/started":
         return {"type": "turn.started"}
@@ -299,9 +299,16 @@ def _map_notification(
             "message": str(params.get("message") or "未知 app-server 错误"),
         }
     if method == "item/started":
+        item = _normalize_item(params.get("item"))
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "agent_message"
+            and isinstance(item.get("id"), str)
+        ):
+            latest_agent_message_by_id[item["id"]] = dict(item)
         return {
             "type": "item.started",
-            "item": _normalize_item(params.get("item")),
+            "item": item,
         }
     if method == "item/completed":
         item = _normalize_item(params.get("item"))
@@ -309,9 +316,8 @@ def _map_notification(
             isinstance(item, dict)
             and item.get("type") == "agent_message"
             and isinstance(item.get("id"), str)
-            and isinstance(item.get("text"), str)
         ):
-            latest_agent_message_by_id[item["id"]] = item["text"]
+            latest_agent_message_by_id[item["id"]] = dict(item)
         return {
             "type": "item.completed",
             "item": item,
@@ -321,16 +327,20 @@ def _map_notification(
         delta = params.get("delta")
         if not isinstance(item_id, str) or not isinstance(delta, str):
             raise RuntimeError("item/agentMessage/delta 缺少必要字段")
-        latest_text = latest_agent_message_by_id.get(item_id, "")
+        latest_item = dict(latest_agent_message_by_id.get(item_id, {}))
+        latest_text = str(latest_item.get("text") or "")
         latest_text += delta
-        latest_agent_message_by_id[item_id] = latest_text
-        return {
-            "type": "item.updated",
-            "item": {
+        latest_item.update(
+            {
                 "type": "agent_message",
                 "id": item_id,
                 "text": latest_text,
-            },
+            }
+        )
+        latest_agent_message_by_id[item_id] = latest_item
+        return {
+            "type": "item.updated",
+            "item": latest_item,
         }
     return None
 
@@ -338,7 +348,7 @@ def _map_notification(
 def run(args: argparse.Namespace) -> int:
     client: AppServerClient | None = None
     final_response = ""
-    latest_agent_message_by_id: dict[str, str] = {}
+    latest_agent_message_by_id: dict[str, dict[str, Any]] = {}
     try:
         cwd = Path(args.cwd).resolve()
         client = AppServerClient.start(args.codex_bin, cwd)
@@ -399,6 +409,7 @@ def run(args: argparse.Namespace) -> int:
                 isinstance(item, dict)
                 and item.get("type") == "agent_message"
                 and isinstance(item.get("text"), str)
+                and str(item.get("phase") or "") == "final_answer"
             ):
                 final_response = item["text"]
 

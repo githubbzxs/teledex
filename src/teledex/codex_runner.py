@@ -26,6 +26,8 @@ class CodexProcessHandle:
 class ParsedCodexEvent:
     status_text: str | None = None
     preview_text: str | None = None
+    commentary_id: str | None = None
+    commentary_text: str | None = None
     thread_id: str | None = None
     final_message: str | None = None
 
@@ -104,7 +106,16 @@ class CodexRunner:
             item_type = str(item.get("type", ""))
             if item_type == "agent_message":
                 text = str(item.get("text", "")).strip()
+                item_id = str(item.get("id", "")).strip() or None
+                phase = str(item.get("phase", "")).strip()
+                if phase == "commentary":
+                    return ParsedCodexEvent(
+                        status_text="正在思考...",
+                        commentary_id=item_id,
+                        commentary_text=text or None,
+                    )
                 return ParsedCodexEvent(
+                    status_text="正在整理回复..." if phase == "final_answer" or text else None,
                     preview_text=text or None,
                     final_message=text or None,
                 )

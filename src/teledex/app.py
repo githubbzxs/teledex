@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .codex_runner import CodexProcessHandle, CodexRunner
 from .config import AppConfig
@@ -33,7 +34,8 @@ _PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 1.0
 _PREVIEW_TYPING_INTERVAL_SECONDS = 1.0
 _PREVIEW_STREAM_STEP_CHARS = 1
-_PREVIEW_MAX_CHARS = 320
+_PREVIEW_HISTORY_MAX_CHARS = 2000
+_PREVIEW_OUTPUT_MAX_CHARS = 400
 _PREVIEW_STREAM_INTERVAL_SECONDS = 0.04
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
 
@@ -64,16 +66,23 @@ class LivePreviewState:
     def __init__(
         self,
         initial_status: str = "正在准备会话...",
-        max_chars: int = _PREVIEW_MAX_CHARS,
+        history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
+        output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
         stream_step_chars: int = _PREVIEW_STREAM_STEP_CHARS,
+        now_func: Callable[[], float] | None = None,
     ) -> None:
         self._status_text = initial_status.strip() or "正在准备会话..."
         self._target_text = ""
         self._visible_chars = 0
+        self._commentary_order: list[str] = []
+        self._commentary_text_by_id: dict[str, str] = {}
         self._frame_index = 0
-        self._max_chars = max_chars
+        self._history_max_chars = max(1, history_max_chars)
+        self._output_max_chars = max(1, output_max_chars)
         self._stream_step_chars = max(1, stream_step_chars)
         self._in_progress = True
+        self._now_func = now_func or time.monotonic
+        self._started_at = self._now_func()
         self._lock = threading.RLock()
 
     def update_status(self, text: str) -> None:
@@ -95,6 +104,17 @@ class LivePreviewState:
             if self._visible_chars == 0:
                 self._visible_chars = min(self._stream_step_chars, len(self._target_text))
             self._status_text = "正在输出..."
+            self._in_progress = True
+
+    def update_commentary(self, item_id: str, text: str) -> None:
+        normalized = strip_citations(text).strip()
+        normalized_id = item_id.strip()
+        if not normalized or not normalized_id:
+            return
+        with self._lock:
+            if normalized_id not in self._commentary_text_by_id:
+                self._commentary_order.append(normalized_id)
+            self._commentary_text_by_id[normalized_id] = normalized
             self._in_progress = True
 
     def advance(self) -> str:
@@ -132,21 +152,65 @@ class LivePreviewState:
             if self._in_progress
             else _PREVIEW_HEARTBEAT_FRAMES[-1]
         )
-        if not self._target_text:
-            return f"{marker} {self._status_text}".strip()
+        sections = [f"思考时间：{_format_elapsed_seconds(self._now_func() - self._started_at)}"]
+        body = self._build_body_locked()
+        if body:
+            sections.extend(["", body])
+        sections.extend(["", f"statusline：{marker} {self._status_text}".strip()])
+        return "\n".join(sections).strip()
 
-        body = _truncate_preview_text(self._target_text[: self._visible_chars], self._max_chars)
-        if not body:
-            return f"{marker} {self._status_text}".strip()
-        if self._in_progress:
-            return f"{marker} {body}".strip()
-        return f"{marker} 已完成 {body}".strip()
+    def _build_body_locked(self) -> str:
+        sections: list[str] = []
+        commentary = self._render_commentary_locked()
+        if commentary:
+            sections.append(f"思考过程：\n{commentary}")
+
+        output_text = _truncate_preview_text(
+            self._target_text[: self._visible_chars],
+            self._output_max_chars,
+        )
+        if output_text:
+            sections.append(f"输出预览：\n{output_text}")
+
+        return "\n\n".join(section for section in sections if section).strip()
+
+    def _render_commentary_locked(self) -> str:
+        if not self._commentary_order:
+            return ""
+        entries = [
+            self._commentary_text_by_id[item_id]
+            for item_id in self._commentary_order
+            if self._commentary_text_by_id.get(item_id)
+        ]
+        return _truncate_preview_middle("\n\n".join(entries), self._history_max_chars)
 
 
 def _truncate_preview_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 3].rstrip() + "..."
+
+
+def _truncate_preview_middle(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 7:
+        return _truncate_preview_text(text, max_chars)
+    separator = "\n...\n"
+    head_chars = max(1, (max_chars - len(separator)) // 2)
+    tail_chars = max(1, max_chars - len(separator) - head_chars)
+    head = text[:head_chars].rstrip()
+    tail = text[-tail_chars:].lstrip()
+    return f"{head}{separator}{tail}"
+
+
+def _format_elapsed_seconds(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 class TeledexApp:
@@ -493,6 +557,11 @@ class TeledexApp:
                     self.storage.update_session_thread_id(session.id, parsed.thread_id)
                 if parsed.final_message:
                     final_message = parsed.final_message
+                if parsed.commentary_id and parsed.commentary_text:
+                    preview_state.update_commentary(
+                        parsed.commentary_id,
+                        parsed.commentary_text,
+                    )
                 if parsed.preview_text:
                     preview_state.update_stream_text(parsed.preview_text)
                 if parsed.status_text:

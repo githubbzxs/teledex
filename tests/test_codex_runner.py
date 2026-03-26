@@ -47,6 +47,27 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertEqual(parsed.preview_text, "正在流式输出")
         self.assertEqual(parsed.final_message, "正在流式输出")
 
+    def test_parse_event_line_supports_commentary_agent_message(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "item.updated",
+                    "item": {
+                        "type": "agent_message",
+                        "id": "msg_1",
+                        "phase": "commentary",
+                        "text": "我先检查目录",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.status_text, "正在思考...")
+        self.assertEqual(parsed.commentary_id, "msg_1")
+        self.assertEqual(parsed.commentary_text, "我先检查目录")
+        self.assertIsNone(parsed.final_message)
+
     def test_parse_event_line_supports_turn_failed(self) -> None:
         parsed = self.runner.parse_event_line(
             json.dumps(
