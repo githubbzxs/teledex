@@ -121,6 +121,36 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertEqual(calls[0]["parse_mode"], "HTML")
 
+    def test_handle_update_treats_double_slash_as_codex_prompt(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        prompts: list[str] = []
+        commands: list[str] = []
+
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming.text)
+
+        def fake_handle_command(incoming: IncomingMessage) -> None:
+            commands.append(incoming.text)
+
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+        self.app._handle_command = fake_handle_command  # type: ignore[method-assign]
+
+        self.app._handle_update(
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 123,
+                    "text": "//status",
+                    "from": {"id": 1},
+                    "chat": {"id": 100},
+                    "message_thread_id": 9,
+                },
+            }
+        )
+
+        self.assertEqual(prompts, ["/status"])
+        self.assertEqual(commands, [])
+
 
 class LivePreviewStateTestCase(unittest.TestCase):
     def test_heartbeat_marker_toggles(self) -> None:

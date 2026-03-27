@@ -28,6 +28,7 @@ HELP_TEXT = """teledex 可用命令：
 /pwd - 查看当前会话目录
 /stop - 停止当前任务
 
+使用 `//命令` 可把 `/命令` 作为 Codex 原生命令发送到当前会话。
 直接发送普通文本，即可继续当前活跃会话。"""
 
 _PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
@@ -281,11 +282,26 @@ class TeledexApp:
             message_thread_id=incoming.message_thread_id,
         )
 
+        if incoming.text.startswith("//"):
+            self._handle_prompt(self._normalize_incoming_message(incoming))
+            return
+
         if incoming.text.startswith("/"):
             self._handle_command(incoming)
             return
 
         self._handle_prompt(incoming)
+
+    def _normalize_incoming_message(self, incoming: IncomingMessage) -> IncomingMessage:
+        if not incoming.text.startswith("//"):
+            return incoming
+        return IncomingMessage(
+            chat_id=incoming.chat_id,
+            user_id=incoming.user_id,
+            text="/" + incoming.text[2:],
+            message_id=incoming.message_id,
+            message_thread_id=incoming.message_thread_id,
+        )
 
     def _handle_command(self, incoming: IncomingMessage) -> None:
         command_text = incoming.text.split()[0]
