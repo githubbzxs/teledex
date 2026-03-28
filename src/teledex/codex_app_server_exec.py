@@ -17,6 +17,12 @@ _REASONING_TEXT_MAX_CHARS = 12_000
 _COMMAND_OUTPUT_MAX_CHARS = 4_000
 _PLAN_TEXT_MAX_CHARS = 8_000
 _BASELINE_TOKENS = 12_000
+_DEFAULT_STATUS_LINE_ITEMS = (
+    "model-with-reasoning",
+    "context-remaining",
+    "current-dir",
+)
+_FAST_STATUS_MODEL = "gpt-5.4"
 
 
 class AppServerClient:
@@ -297,6 +303,65 @@ def _reasoning_effort_label(value: Any) -> str:
     }.get(normalized, "default")
 
 
+def _extract_reasoning_effort(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in (
+        "reasoningEffort",
+        "reasoning_effort",
+        "model_reasoning_effort",
+        "modelReasoningEffort",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _extract_service_tier(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("serviceTier", "service_tier"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _extract_status_line_items(payload: Any) -> tuple[str, ...]:
+    if not isinstance(payload, dict):
+        return _DEFAULT_STATUS_LINE_ITEMS
+    tui = payload.get("tui")
+    if not isinstance(tui, dict):
+        return _DEFAULT_STATUS_LINE_ITEMS
+    raw_items = tui.get("status_line")
+    if not isinstance(raw_items, list):
+        return _DEFAULT_STATUS_LINE_ITEMS
+    items = tuple(
+        str(item).strip()
+        for item in raw_items
+        if isinstance(item, str) and item.strip()
+    )
+    return items or _DEFAULT_STATUS_LINE_ITEMS
+
+
+def _update_status_line_from_binding(
+    status_line_state: dict[str, Any],
+    binding: dict[str, Any],
+) -> None:
+    if not isinstance(binding, dict):
+        return
+    model = str(binding.get("model") or "").strip()
+    if model:
+        status_line_state["model"] = model
+    reasoning_effort = _extract_reasoning_effort(binding)
+    if reasoning_effort:
+        status_line_state["reasoning_effort"] = reasoning_effort
+    service_tier = _extract_service_tier(binding)
+    if service_tier:
+        status_line_state["service_tier"] = service_tier
+
+
 def _format_directory_display(directory: Path) -> str:
     try:
         home = Path.home().resolve()
@@ -327,13 +392,35 @@ def _compute_context_remaining_percent(token_usage: dict[str, Any]) -> int:
 def _build_footer_statusline(status_line_state: dict[str, Any]) -> str:
     model = str(status_line_state.get("model") or "").strip() or "loading"
     reasoning_effort = _reasoning_effort_label(status_line_state.get("reasoning_effort"))
+    service_tier = str(status_line_state.get("service_tier") or "").strip().lower()
     current_dir = _format_directory_display(Path(status_line_state["cwd"]))
     context_remaining = status_line_state.get("context_remaining_percent")
+    thread_id = str(status_line_state.get("thread_id") or "").strip()
+    status_line_items = status_line_state.get("status_line_items") or _DEFAULT_STATUS_LINE_ITEMS
 
-    segments = [f"{model} {reasoning_effort}"]
-    if isinstance(context_remaining, int):
-        segments.append(f"{context_remaining}% left")
-    segments.append(current_dir)
+    value_by_item = {
+        "model-name": model,
+        "model-with-reasoning": (
+            f"{model} {reasoning_effort}"
+            f"{' fast' if model == _FAST_STATUS_MODEL and service_tier == 'fast' else ''}"
+        ).strip(),
+        "current-dir": current_dir,
+        "context-remaining": (
+            f"{context_remaining}% left" if isinstance(context_remaining, int) else ""
+        ),
+        "context-used": (
+            f"{max(0, 100 - context_remaining)}% used"
+            if isinstance(context_remaining, int)
+            else ""
+        ),
+        "session-id": thread_id,
+        "fast-mode": "Fast on" if service_tier == "fast" else "Fast off",
+    }
+    segments = [
+        value_by_item.get(str(item).strip(), "")
+        for item in status_line_items
+        if str(item).strip()
+    ]
     return " · ".join(segment for segment in segments if segment)
 
 
@@ -522,6 +609,9 @@ def _map_notification(
             "footer_statusline": _build_footer_statusline(status_line_state),
         }
     if method == "turn/started":
+        reasoning_effort = _extract_reasoning_effort(params)
+        if reasoning_effort:
+            status_line_state["reasoning_effort"] = reasoning_effort
         return {"type": "turn.started"}
     if method == "turn/completed":
         turn = params.get("turn")
@@ -752,7 +842,9 @@ def run(args: argparse.Namespace) -> int:
                 or str(args.model or "").strip()
                 or "loading"
             ),
-            "reasoning_effort": (config or {}).get("modelReasoningEffort"),
+            "reasoning_effort": _extract_reasoning_effort(config),
+            "service_tier": _extract_service_tier(config),
+            "status_line_items": _extract_status_line_items(config),
             "context_remaining_percent": 100,
             "last_emitted_line": "",
         }
@@ -766,7 +858,9 @@ def run(args: argparse.Namespace) -> int:
                 "thread/start",
                 _build_thread_start_params(args),
             )
+        _update_status_line_from_binding(status_line_state, binding)
         thread_id, thread_cwd = _resolve_thread_binding(binding)
+        status_line_state["thread_id"] = thread_id
         if thread_cwd and Path(thread_cwd).resolve() != cwd:
             raise RuntimeError(
                 f"Codex 会话目录不一致：期望 {cwd}，实际 {thread_cwd}"
