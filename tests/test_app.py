@@ -495,6 +495,17 @@ class LivePreviewStateTestCase(unittest.TestCase):
         self.assertIn("• 列表项", rendered)
         self.assertIn("<b>加粗</b>", rendered)
 
+    def test_render_clips_preview_to_telegram_safe_length(self) -> None:
+        preview = LivePreviewState()
+        preview.update_commentary("msg_1", "A" * 2200)
+        preview.update_tool_state("call_1", command_text="cmd", output_text="B" * 2200)
+        preview.update_stream_text("C" * 2200)
+
+        rendered = preview.render()
+
+        self.assertLessEqual(len(rendered), 3800)
+        self.assertTrue(rendered.endswith("..."))
+
 
 if __name__ == "__main__":
     unittest.main()

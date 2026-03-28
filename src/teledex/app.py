@@ -41,6 +41,7 @@ _PREVIEW_COMPLETE_FRAME = "●"
 _PREVIEW_HISTORY_MAX_CHARS = 2000
 _PREVIEW_TOOL_OUTPUT_MAX_CHARS = 2000
 _PREVIEW_OUTPUT_MAX_CHARS = 2200
+_PREVIEW_MESSAGE_MAX_CHARS = 3800
 _PREVIEW_LOOP_IDLE_SECONDS = 0.1
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
 _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
@@ -253,7 +254,8 @@ class LivePreviewState:
             sections.extend(["", body])
         if self._footer_statusline:
             sections.extend(["", self._footer_statusline])
-        return "\n".join(sections).strip()
+        rendered = "\n".join(sections).strip()
+        return _truncate_preview_text(rendered, _PREVIEW_MESSAGE_MAX_CHARS)
 
     def _render_final_html_locked(self) -> str:
         marker = (
