@@ -37,7 +37,7 @@ HELP_TEXT = """teledex 可用命令：
 使用 `//命令` 可把 `/命令` 作为 Codex 原生命令发送到当前会话。
 直接发送普通文本，即可继续当前活跃会话。"""
 
-_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 0.4
+_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 1.0
 _PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_TYPING_INTERVAL_SECONDS = 1.0
 _PREVIEW_STREAM_STEP_CHARS = 1
@@ -191,13 +191,16 @@ class LivePreviewState:
         with self._lock:
             return self._target_text
 
-    def complete(self) -> str:
+    def finish(self, status_text: str) -> str:
         with self._lock:
             self._visible_chars = len(self._target_text)
-            self._status_text = "Completed"
+            self._status_text = status_text.strip() or self._status_text
             self._in_progress = False
             self._flush_requested = False
             return self._render_locked()
+
+    def complete(self) -> str:
+        return self.finish("Completed")
 
     def _render_locked(self) -> str:
         marker = (
@@ -735,7 +738,7 @@ class TeledexApp:
             preview_state.update_status("Working")
             self._stop_preview_loop(preview_stop_event, preview_worker)
             self._drain_preview_stream(active_run, preview_state)
-            self._send_run_result(active_run, final_message)
+            self._send_run_result(active_run, final_message, preview_state)
             self.storage.finish_run(
                 active_run.run_id,
                 status="completed",
@@ -743,9 +746,9 @@ class TeledexApp:
             )
             self.storage.update_session_status(session.id, "idle")
         except InterruptedError:
-            preview_state.update_status("Stopped")
+            preview_state.finish("Stopped")
             self._stop_preview_loop(preview_stop_event, preview_worker)
-            self._update_preview(active_run, "Stopped")
+            self._render_finished_preview(active_run, preview_state)
             self._safe_send_message(
                 active_run.chat_id,
                 f"会话 #{session.id} 的任务已停止。",
@@ -759,9 +762,9 @@ class TeledexApp:
             self.storage.update_session_status(session.id, "idle")
         except Exception as exc:
             self.logger.exception("执行会话 #%s 失败", session.id)
-            preview_state.update_status("Failed")
+            preview_state.finish("Failed")
             self._stop_preview_loop(preview_stop_event, preview_worker)
-            self._update_preview(active_run, "Failed")
+            self._render_finished_preview(active_run, preview_state)
             self._safe_send_message(
                 active_run.chat_id,
                 f"会话 #{session.id} 执行失败：{exc}",
@@ -912,7 +915,31 @@ class TeledexApp:
             self.logger.exception("更新预览消息失败")
             return False
 
-    def _send_run_result(self, active_run: ActiveRun, text: str) -> None:
+    def _render_finished_preview(
+        self,
+        active_run: ActiveRun,
+        preview_state: LivePreviewState,
+    ) -> bool:
+        rendered_html = preview_state.render_html()
+        if rendered_html and self._edit_preview_message(
+            active_run,
+            rendered_html,
+            parse_mode="HTML",
+        ):
+            return True
+        return self._edit_preview_message(active_run, preview_state.render())
+
+    def _send_run_result(
+        self,
+        active_run: ActiveRun,
+        text: str,
+        preview_state: LivePreviewState | None = None,
+    ) -> None:
+        if preview_state is not None:
+            preview_state.update_stream_text(text)
+            preview_state.complete()
+            if self._render_finished_preview(active_run, preview_state):
+                return
         inline_text, parse_mode = self._build_inline_result(text)
         if self._edit_preview_message(active_run, inline_text, parse_mode=parse_mode):
             return

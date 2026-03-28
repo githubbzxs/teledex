@@ -30,6 +30,18 @@ class FormattingTestCase(unittest.TestCase):
         self.assertIn('<a href="https://example.com">链接</a>', html)
         self.assertIn("&gt; 引用内容", html)
 
+    def test_markdown_to_telegram_html_degrades_local_file_links(self) -> None:
+        markdown = (
+            "位置："
+            "[cli.py:11](/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11)"
+        )
+
+        html = markdown_to_telegram_html(markdown)
+
+        self.assertIn("cli.py:11", html)
+        self.assertIn("<code>/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11</code>", html)
+        self.assertNotIn("[cli.py:11]", html)
+
     def test_split_markdown_message_keeps_code_blocks_renderable(self) -> None:
         code_lines = "\n".join(f"print({index})" for index in range(40))
         markdown = f"前言\n\n```python\n{code_lines}\n```\n\n收尾"

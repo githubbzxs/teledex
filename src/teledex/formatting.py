@@ -50,7 +50,7 @@ def preview_text_for_agent_message(text: str, max_length: int = 80) -> str:
 
 
 _INLINE_CODE_PATTERN = re.compile(r"`([^`\n]+)`")
-_LINK_PATTERN = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+_LINK_PATTERN = re.compile(r"\[([^\]\n]+)\]\(([^)\n]+)\)")
 _STRONG_PATTERNS = [
     re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", flags=re.DOTALL),
     re.compile(r"__(?=\S)(.+?)(?<=\S)__", flags=re.DOTALL),
@@ -292,10 +292,7 @@ def _render_inline(text: str) -> str:
     for _ in range(3):
         previous = rendered
         rendered = _LINK_PATTERN.sub(
-            lambda match: (
-                f'<a href="{html.escape(match.group(2), quote=True)}">'
-                f"{match.group(1)}</a>"
-            ),
+            _render_markdown_link,
             rendered,
         )
         rendered = _apply_wrapped_pattern(rendered, _STRONG_PATTERNS, "b")
@@ -314,3 +311,13 @@ def _apply_wrapped_pattern(text: str, patterns: list[re.Pattern[str]], tag: str)
     for pattern in patterns:
         rendered = pattern.sub(rf"<{tag}>\1</{tag}>", rendered)
     return rendered
+
+
+def _render_markdown_link(match: re.Match[str]) -> str:
+    label = match.group(1)
+    target = html.unescape(match.group(2)).strip()
+    if not target:
+        return label
+    if target.startswith(("http://", "https://")):
+        return f'<a href="{html.escape(target, quote=True)}">{label}</a>'
+    return f"{label} <code>{html.escape(target)}</code>"

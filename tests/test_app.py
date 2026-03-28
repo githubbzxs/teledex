@@ -121,6 +121,44 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertEqual(calls[0]["parse_mode"], "HTML")
 
+    def test_send_run_result_keeps_footer_statusline_when_preview_state_is_present(self) -> None:
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        preview = LivePreviewState()
+        preview.update_footer_statusline("gpt-5.4 default · 98% left · ~/teledex")
+        calls: list[dict[str, object]] = []
+
+        def fake_edit_preview_message(
+            active_run: ActiveRun,
+            text: str,
+            parse_mode: str | None = None,
+        ) -> bool:
+            calls.append(
+                {
+                    "chat_id": active_run.chat_id,
+                    "text": text,
+                    "message_thread_id": active_run.message_thread_id,
+                    "parse_mode": parse_mode,
+                }
+            )
+            return True
+
+        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
+        self.app._send_run_result(active_run, "最终回复", preview)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("● Completed", str(calls[0]["text"]))
+        self.assertIn("最终回复", str(calls[0]["text"]))
+        self.assertIn("gpt-5.4 default · 98% left · ~/teledex", str(calls[0]["text"]))
+        self.assertEqual(calls[0]["parse_mode"], "HTML")
+
     def test_handle_update_treats_double_slash_as_codex_prompt(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         prompts: list[str] = []
