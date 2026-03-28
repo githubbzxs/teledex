@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import html
 import logging
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from .codex_runner import CodexProcessHandle, CodexRunner
 from .config import AppConfig
@@ -81,7 +81,6 @@ class LivePreviewState:
         history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
         output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
         tool_output_max_chars: int = _PREVIEW_TOOL_OUTPUT_MAX_CHARS,
-        now_func: Callable[[], float] | None = None,
     ) -> None:
         self._status_text = initial_status.strip() or "Working"
         self._target_text = ""
@@ -97,9 +96,7 @@ class LivePreviewState:
         self._tool_output_max_chars = max(1, tool_output_max_chars)
         self._in_progress = True
         self._flush_requested = False
-        self._now_func = now_func or time.monotonic
-        self._started_at = self._now_func()
-        self._finished_at: float | None = None
+        self._elapsed_seconds = 0
         self._lock = threading.RLock()
 
     def update_status(self, text: str) -> None:
@@ -203,15 +200,20 @@ class LivePreviewState:
             self._footer_statusline = normalized
             self._flush_requested = True
 
-    def advance(self, animate: bool = False) -> str:
+    def advance(self, animate: bool = False, elapsed_seconds: int = 0) -> str:
         with self._lock:
             if animate and self._in_progress:
                 self._frame_index = (self._frame_index + 1) % len(_PREVIEW_HEARTBEAT_FRAMES)
+                self._elapsed_seconds += max(0, elapsed_seconds)
             return self._render_locked()
 
     def render(self) -> str:
         with self._lock:
             return self._render_locked()
+
+    def render_final_html(self) -> str:
+        with self._lock:
+            return self._render_final_html_locked()
 
     def has_pending_stream(self) -> bool:
         with self._lock:
@@ -234,7 +236,6 @@ class LivePreviewState:
             self._tool_command_text = ""
             self._tool_output_text = ""
             self._in_progress = False
-            self._finished_at = self._now_func()
             self._flush_requested = True
             return self._render_locked()
 
@@ -242,20 +243,41 @@ class LivePreviewState:
         return self.finish("Completed")
 
     def _render_locked(self) -> str:
-        elapsed_at = self._finished_at if self._finished_at is not None else self._now_func()
         marker = (
             _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
             if self._in_progress
             else _PREVIEW_HEARTBEAT_FRAMES[-1]
         )
         sections = [
-            f"{marker} {self._status_text} ({_format_elapsed_compact(elapsed_at - self._started_at)})"
+            f"{marker} {self._status_text} ({_format_elapsed_compact(self._elapsed_seconds)})"
         ]
         body = self._build_body_locked()
         if body:
             sections.extend(["", body])
         if self._footer_statusline:
             sections.extend(["", self._footer_statusline])
+        return "\n".join(sections).strip()
+
+    def _render_final_html_locked(self) -> str:
+        marker = (
+            _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
+            if self._in_progress
+            else _PREVIEW_HEARTBEAT_FRAMES[-1]
+        )
+        sections = [
+            html.escape(
+                f"{marker} {self._status_text} ({_format_elapsed_compact(self._elapsed_seconds)})"
+            )
+        ]
+        if self._target_text:
+            sections.extend(
+                [
+                    "",
+                    markdown_to_telegram_html(self._target_text) or html.escape(self._target_text),
+                ]
+            )
+        if self._footer_statusline:
+            sections.extend(["", html.escape(self._footer_statusline)])
         return "\n".join(sections).strip()
 
     def _build_body_locked(self) -> str:
@@ -857,6 +879,7 @@ class TeledexApp:
         heartbeat_interval = _normalize_preview_interval(
             self.config.preview_update_interval_seconds
         )
+        heartbeat_step_seconds = max(1, int(round(heartbeat_interval)))
         next_heartbeat_at = time.monotonic()
         while not stop_event.is_set():
             now = time.monotonic()
@@ -868,28 +891,29 @@ class TeledexApp:
                 )
                 last_typing_at = now
 
-            if preview_state.has_pending_stream():
-                text = preview_state.advance(animate=False)
+            now = time.monotonic()
+            heartbeat_due = now >= next_heartbeat_at
+            if heartbeat_due:
+                next_heartbeat_at = _next_preview_deadline(
+                    next_heartbeat_at,
+                    now,
+                    heartbeat_interval,
+                )
+
+            has_pending_stream = preview_state.has_pending_stream()
+            if has_pending_stream or heartbeat_due:
+                text = preview_state.advance(
+                    animate=heartbeat_due,
+                    elapsed_seconds=heartbeat_step_seconds if heartbeat_due else 0,
+                )
                 if text and text != last_preview_text:
                     self._update_preview(active_run, text, prefer_html=False)
                     last_preview_text = text
+                if has_pending_stream:
                     preview_state.mark_rendered()
-                    continue
 
-            now = time.monotonic()
-            next_heartbeat_at = _next_preview_deadline(
-                next_heartbeat_at,
-                now,
-                heartbeat_interval,
-            )
-            wait_seconds = max(0.0, next_heartbeat_at - now)
-            if stop_event.wait(wait_seconds):
+            if stop_event.wait(_PREVIEW_LOOP_IDLE_SECONDS):
                 break
-
-            text = preview_state.advance(animate=True)
-            if text and text != last_preview_text:
-                self._update_preview(active_run, text, prefer_html=False)
-                last_preview_text = text
 
     def _stop_preview_loop(
         self,
@@ -907,7 +931,7 @@ class TeledexApp:
     ) -> None:
         deadline = time.monotonic() + _PREVIEW_DRAIN_TIMEOUT_SECONDS
         while preview_state.has_pending_stream() and time.monotonic() < deadline:
-            text = preview_state.advance(animate=False)
+            text = preview_state.advance(animate=False, elapsed_seconds=0)
             self._update_preview(active_run, text, prefer_html=False)
             preview_state.mark_rendered()
             time.sleep(_PREVIEW_LOOP_IDLE_SECONDS)
@@ -957,6 +981,13 @@ class TeledexApp:
         active_run: ActiveRun,
         preview_state: LivePreviewState,
     ) -> bool:
+        rendered_html = preview_state.render_final_html()
+        if self._edit_preview_message(
+            active_run,
+            rendered_html,
+            parse_mode="HTML",
+        ):
+            return True
         return self._edit_preview_message(active_run, preview_state.render())
 
     def _send_run_result(
@@ -983,6 +1014,9 @@ class TeledexApp:
     def _build_inline_result(self, text: str) -> tuple[str, str | None]:
         plain_limit = 3400
         cleaned = text.strip()
+        html_text = markdown_to_telegram_html(cleaned)
+        if html_text and len(html_text) <= 3500:
+            return html_text, "HTML"
         plain_text = f"Completed\n\n{cleaned}" if cleaned else "Completed"
         if len(plain_text) <= plain_limit:
             return plain_text, None

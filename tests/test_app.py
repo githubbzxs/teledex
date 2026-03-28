@@ -126,9 +126,8 @@ class AppMessagingTestCase(unittest.TestCase):
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(len(calls), 1)
-        self.assertIn("Completed", str(calls[0]["text"]))
         self.assertIn("最终回复", str(calls[0]["text"]))
-        self.assertIsNone(calls[0]["parse_mode"])
+        self.assertEqual(calls[0]["parse_mode"], "HTML")
 
     def test_send_run_result_keeps_footer_statusline_when_preview_state_is_present(self) -> None:
         active_run = ActiveRun(
@@ -166,7 +165,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("Completed", str(calls[0]["text"]))
         self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertIn("gpt-5.4 default · 98% left · ~/teledex", str(calls[0]["text"]))
-        self.assertIsNone(calls[0]["parse_mode"])
+        self.assertEqual(calls[0]["parse_mode"], "HTML")
 
     def test_sync_bot_commands_registers_management_commands(self) -> None:
         commands: list[tuple[tuple[str, str], ...]] = []
@@ -291,12 +290,10 @@ class LivePreviewStateTestCase(unittest.TestCase):
         self.assertEqual(_next_preview_deadline(10.0, 12.3, 1.0), 13.0)
 
     def test_status_line_tracks_elapsed_with_circle_animation(self) -> None:
-        now = [0.0]
-        preview = LivePreviewState(initial_status="Thinking", now_func=lambda: now[0])
+        preview = LivePreviewState(initial_status="Thinking")
 
         self.assertEqual(preview.render(), "○ Thinking (0s)")
-        now[0] = 1.0
-        self.assertEqual(preview.advance(animate=True), "● Thinking (1s)")
+        self.assertEqual(preview.advance(animate=True, elapsed_seconds=1), "● Thinking (1s)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState()
@@ -367,6 +364,18 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_stream_text("最终输出")
 
         self.assertEqual(preview.render(), "○ Working (0s)\n\n最终输出")
+
+    def test_final_html_only_renders_final_answer_markdown(self) -> None:
+        preview = LivePreviewState()
+        preview.update_stream_text("## 标题\n\n- 列表项\n\n**加粗**")
+        preview.complete()
+
+        rendered = preview.render_final_html()
+
+        self.assertIn("● Completed (0s)", rendered)
+        self.assertIn("<b>标题</b>", rendered)
+        self.assertIn("• 列表项", rendered)
+        self.assertIn("<b>加粗</b>", rendered)
 
 
 if __name__ == "__main__":
