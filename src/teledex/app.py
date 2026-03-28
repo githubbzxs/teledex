@@ -86,9 +86,9 @@ class LivePreviewState:
         self._target_text = ""
         self._commentary_order: list[str] = []
         self._commentary_text_by_id: dict[str, str] = {}
-        self._active_tool_call_id: str | None = None
-        self._tool_command_text = ""
-        self._tool_output_text = ""
+        self._tool_order: list[str] = []
+        self._tool_command_by_id: dict[str, str] = {}
+        self._tool_output_by_id: dict[str, str] = {}
         self._footer_statusline = ""
         self._frame_index = 0
         self._history_max_chars = max(1, history_max_chars)
@@ -119,9 +119,9 @@ class LivePreviewState:
             self._target_text = normalized
             self._commentary_order.clear()
             self._commentary_text_by_id.clear()
-            self._active_tool_call_id = None
-            self._tool_command_text = ""
-            self._tool_output_text = ""
+            self._tool_order.clear()
+            self._tool_command_by_id.clear()
+            self._tool_output_by_id.clear()
             self._in_progress = True
             self._flush_requested = True
 
@@ -156,8 +156,7 @@ class LivePreviewState:
             if (
                 not self._commentary_order
                 and not self._target_text
-                and not self._tool_command_text
-                and not self._tool_output_text
+                and not self._tool_order
                 and self._status_text == "Thinking"
             ):
                 self._status_text = "Working"
@@ -169,21 +168,20 @@ class LivePreviewState:
         command_text: str | None = None,
         output_text: str | None = None,
     ) -> None:
+        normalized_id = (item_id or "tool:fallback").strip()
         normalized_command = (command_text or "").strip()
         normalized_output = (output_text or "").replace("\r\n", "\n").rstrip()
-        if not item_id and not normalized_command and not normalized_output:
+        if not normalized_id or (not normalized_command and not normalized_output):
             return
         with self._lock:
-            if item_id and item_id != self._active_tool_call_id:
-                self._active_tool_call_id = item_id
-                self._tool_command_text = ""
-                self._tool_output_text = ""
+            if normalized_id not in self._tool_order:
+                self._tool_order.append(normalized_id)
             changed = False
-            if normalized_command and normalized_command != self._tool_command_text:
-                self._tool_command_text = normalized_command
+            if normalized_command and normalized_command != self._tool_command_by_id.get(normalized_id, ""):
+                self._tool_command_by_id[normalized_id] = normalized_command
                 changed = True
-            if normalized_output and normalized_output != self._tool_output_text:
-                self._tool_output_text = normalized_output
+            if normalized_output and normalized_output != self._tool_output_by_id.get(normalized_id, ""):
+                self._tool_output_by_id[normalized_id] = normalized_output
                 changed = True
             if not changed:
                 return
@@ -200,10 +198,12 @@ class LivePreviewState:
             self._footer_statusline = normalized
             self._flush_requested = True
 
-    def advance(self, animate: bool = False, elapsed_seconds: int = 0) -> str:
+    def advance(self, animate_steps: int = 0, elapsed_seconds: int = 0) -> str:
         with self._lock:
-            if animate and self._in_progress:
-                self._frame_index = (self._frame_index + 1) % len(_PREVIEW_HEARTBEAT_FRAMES)
+            if animate_steps > 0 and self._in_progress:
+                self._frame_index = (
+                    self._frame_index + animate_steps
+                ) % len(_PREVIEW_HEARTBEAT_FRAMES)
                 self._elapsed_seconds += max(0, elapsed_seconds)
             return self._render_locked()
 
@@ -232,9 +232,9 @@ class LivePreviewState:
             self._status_text = status_text.strip() or self._status_text
             self._commentary_order.clear()
             self._commentary_text_by_id.clear()
-            self._active_tool_call_id = None
-            self._tool_command_text = ""
-            self._tool_output_text = ""
+            self._tool_order.clear()
+            self._tool_command_by_id.clear()
+            self._tool_output_by_id.clear()
             self._in_progress = False
             self._flush_requested = True
             return self._render_locked()
@@ -286,9 +286,9 @@ class LivePreviewState:
         if commentary:
             sections.append(commentary)
 
-        tool_block = self._render_tool_block_locked()
-        if tool_block:
-            sections.append(tool_block)
+        tool_blocks = self._render_tool_blocks_locked()
+        if tool_blocks:
+            sections.append(tool_blocks)
 
         output_text = _truncate_preview_text(
             self._target_text,
@@ -309,13 +309,24 @@ class LivePreviewState:
         ]
         return _truncate_preview_middle("\n\n".join(entries), self._history_max_chars)
 
-    def _render_tool_block_locked(self) -> str:
-        output_text = _truncate_preview_tail(
-            self._tool_output_text,
-            self._tool_output_max_chars,
-        )
-        parts = [part for part in (self._tool_command_text, output_text) if part]
-        return "\n".join(parts).strip()
+    def _render_tool_blocks_locked(self) -> str:
+        blocks: list[str] = []
+        for item_id in self._tool_order:
+            output_text = _truncate_preview_tail(
+                self._tool_output_by_id.get(item_id, ""),
+                self._tool_output_max_chars,
+            )
+            parts = [
+                part
+                for part in (
+                    self._tool_command_by_id.get(item_id, ""),
+                    output_text,
+                )
+                if part
+            ]
+            if parts:
+                blocks.append("\n".join(parts).strip())
+        return "\n\n".join(blocks).strip()
 
 
 def _truncate_preview_text(text: str, max_chars: int) -> str:
@@ -759,8 +770,6 @@ class TeledexApp:
                         parsed.commentary_id,
                         parsed.commentary_text,
                     )
-                if parsed.commentary_completed_id:
-                    preview_state.clear_commentary(parsed.commentary_completed_id)
                 if parsed.tool_call_id or parsed.tool_command_text or parsed.tool_output_text:
                     preview_state.update_tool_state(
                         parsed.tool_call_id,
@@ -892,19 +901,16 @@ class TeledexApp:
                 last_typing_at = now
 
             now = time.monotonic()
-            heartbeat_due = now >= next_heartbeat_at
-            if heartbeat_due:
-                next_heartbeat_at = _next_preview_deadline(
-                    next_heartbeat_at,
-                    now,
-                    heartbeat_interval,
-                )
+            heartbeat_ticks = 0
+            while next_heartbeat_at <= now:
+                heartbeat_ticks += 1
+                next_heartbeat_at += heartbeat_interval
 
             has_pending_stream = preview_state.has_pending_stream()
-            if has_pending_stream or heartbeat_due:
+            if has_pending_stream or heartbeat_ticks > 0:
                 text = preview_state.advance(
-                    animate=heartbeat_due,
-                    elapsed_seconds=heartbeat_step_seconds if heartbeat_due else 0,
+                    animate_steps=heartbeat_ticks,
+                    elapsed_seconds=heartbeat_step_seconds * heartbeat_ticks,
                 )
                 if text and text != last_preview_text:
                     self._update_preview(active_run, text, prefer_html=False)
@@ -931,7 +937,7 @@ class TeledexApp:
     ) -> None:
         deadline = time.monotonic() + _PREVIEW_DRAIN_TIMEOUT_SECONDS
         while preview_state.has_pending_stream() and time.monotonic() < deadline:
-            text = preview_state.advance(animate=False, elapsed_seconds=0)
+            text = preview_state.advance(animate_steps=0, elapsed_seconds=0)
             self._update_preview(active_run, text, prefer_html=False)
             preview_state.mark_rendered()
             time.sleep(_PREVIEW_LOOP_IDLE_SECONDS)

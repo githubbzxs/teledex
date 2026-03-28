@@ -293,7 +293,12 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview = LivePreviewState(initial_status="Thinking")
 
         self.assertEqual(preview.render(), "○ Thinking (0s)")
-        self.assertEqual(preview.advance(animate=True, elapsed_seconds=1), "● Thinking (1s)")
+        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=1), "● Thinking (1s)")
+
+    def test_status_line_can_catch_up_multiple_elapsed_seconds(self) -> None:
+        preview = LivePreviewState(initial_status="Thinking")
+
+        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=3), "● Thinking (3s)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState()
@@ -338,14 +343,13 @@ class LivePreviewStateTestCase(unittest.TestCase):
             "● Completed (0s)\n\n完成内容",
         )
 
-    def test_commentary_completion_removes_transient_text(self) -> None:
+    def test_commentary_can_be_kept_until_final_answer_starts(self) -> None:
         preview = LivePreviewState()
         preview.update_commentary("reasoning:item_1", "**Thinking**\n\nChecking files")
-        preview.clear_commentary("reasoning:item_1")
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)",
+            "○ Working (0s)\n\n**Thinking**\n\nChecking files",
         )
 
     def test_footer_statusline_renders_at_bottom(self) -> None:
