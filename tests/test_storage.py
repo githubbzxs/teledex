@@ -57,6 +57,7 @@ class StorageTestCase(unittest.TestCase):
         fetched = self.storage.get_session(session.id, 2)
         self.assertIsNotNone(fetched)
         assert fetched is not None
+        self.assertEqual(fetched.title, "/root/demo-next")
         self.assertEqual(fetched.bound_path, "/root/demo-next")
         self.assertIsNone(fetched.codex_thread_id)
 

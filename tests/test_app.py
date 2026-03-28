@@ -335,6 +335,80 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
+    def test_tnew_uses_unbound_path_title_when_not_provided(self) -> None:
+        calls: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            calls.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=111,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/tnew",
+                message_id=1,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("当前名称：未绑定目录 #1", calls[0])
+        self.assertIn("绑定后会自动改成路径名", calls[0])
+
+    def test_tbind_updates_session_name_to_bound_path(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "会话一")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        calls: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            calls.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=222,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.reset_terminal = lambda session_id: None  # type: ignore[method-assign]
+        self.app.runner.ensure_terminal = lambda session_id, cwd: "teledex-1"  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text=f"/tbind {self.temp_dir.name}",
+                message_id=2,
+                message_thread_id=9,
+            )
+        )
+
+        updated = self.app.storage.get_session(session.id, 1)
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated.title, self.temp_dir.name)
+        self.assertEqual(len(calls), 1)
+        self.assertIn(f"当前名称：{self.temp_dir.name}", calls[0])
+
     def test_sync_bot_commands_registers_management_commands(self) -> None:
         commands: list[tuple[tuple[str, str], ...]] = []
 

@@ -24,7 +24,7 @@ from .telegram_api import (
 
 HELP_TEXT = """teledex 可用命令：
 /start - 查看帮助
-/tnew [标题] - 新建 teledex 会话
+/tnew - 新建 teledex 会话
 /tsessions - 查看会话列表
 /tuse <id> - 切换当前会话
 /tbind <绝对路径> - 绑定当前会话目录并启动持久 tmux 终端
@@ -492,7 +492,7 @@ class TeledexApp:
             return
 
         if command == "/tnew":
-            title = args or f"会话 {len(self.storage.list_sessions(incoming.user_id)) + 1}"
+            title = args or f"未绑定目录 #{len(self.storage.list_sessions(incoming.user_id)) + 1}"
             session = self.storage.create_session(incoming.user_id, title)
             self.storage.set_active_session(
                 incoming.user_id,
@@ -502,7 +502,7 @@ class TeledexApp:
             )
             self._safe_send_message(
                 incoming.chat_id,
-                f"已创建会话 #{session.id}\n标题：{session.title}\n接下来请先用 /tbind 绑定目录。",
+                f"已创建会话 #{session.id}\n当前名称：{session.title}\n接下来请先用 /tbind 绑定目录，绑定后会自动改成路径名。",
                 incoming.message_thread_id,
             )
             return
@@ -624,12 +624,14 @@ class TeledexApp:
                 tmux_session_name = self.runner.ensure_terminal(active_session.id, bound_path)
                 message = (
                     f"会话 #{active_session.id} 已绑定目录：\n{bound_path}\n"
+                    f"当前名称：{bound_path}\n"
                     f"持久终端：tmux `{tmux_session_name}`"
                 )
             except Exception as exc:
                 self.logger.exception("初始化 tmux 会话失败")
                 message = (
                     f"会话 #{active_session.id} 已绑定目录：\n{bound_path}\n"
+                    f"当前名称：{bound_path}\n"
                     f"但持久 tmux 终端初始化失败：{exc}"
                 )
             self._safe_send_message(incoming.chat_id, message, incoming.message_thread_id)
