@@ -16,6 +16,7 @@ _STREAM_TEXT_MAX_CHARS = 200_000
 _REASONING_TEXT_MAX_CHARS = 12_000
 _COMMAND_OUTPUT_MAX_CHARS = 4_000
 _PLAN_TEXT_MAX_CHARS = 8_000
+_BASELINE_TOKENS = 12_000
 
 
 class AppServerClient:
@@ -262,6 +263,69 @@ def _extract_error_message(params: dict[str, Any]) -> str:
     return str(params.get("message") or "未知 app-server 错误").strip() or "未知 app-server 错误"
 
 
+def _reasoning_effort_label(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return {
+        "minimal": "minimal",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+    }.get(normalized, "default")
+
+
+def _format_directory_display(directory: Path) -> str:
+    try:
+        home = Path.home().resolve()
+        resolved = directory.resolve()
+        relative = resolved.relative_to(home)
+        return "~" if not str(relative) else f"~/{relative.as_posix()}"
+    except Exception:
+        return directory.as_posix()
+
+
+def _compute_context_remaining_percent(token_usage: dict[str, Any]) -> int:
+    model_context_window = token_usage.get("modelContextWindow")
+    if not isinstance(model_context_window, int):
+        return 100
+    if model_context_window <= _BASELINE_TOKENS:
+        return 0
+
+    last_usage = token_usage.get("last")
+    if not isinstance(last_usage, dict):
+        return 100
+    total_tokens = int(last_usage.get("totalTokens") or 0)
+    effective_window = model_context_window - _BASELINE_TOKENS
+    used = max(total_tokens - _BASELINE_TOKENS, 0)
+    remaining = max(effective_window - used, 0)
+    return int(round(max(0.0, min(100.0, remaining * 100.0 / effective_window))))
+
+
+def _build_footer_statusline(status_line_state: dict[str, Any]) -> str:
+    model = str(status_line_state.get("model") or "").strip() or "loading"
+    reasoning_effort = _reasoning_effort_label(status_line_state.get("reasoning_effort"))
+    current_dir = _format_directory_display(Path(status_line_state["cwd"]))
+    context_remaining = status_line_state.get("context_remaining_percent")
+
+    segments = [f"{model} {reasoning_effort}"]
+    if isinstance(context_remaining, int):
+        segments.append(f"{context_remaining}% left")
+    segments.append(current_dir)
+    return " · ".join(segment for segment in segments if segment)
+
+
+def _statusline_event_if_changed(status_line_state: dict[str, Any]) -> dict[str, Any] | None:
+    line = _build_footer_statusline(status_line_state)
+    previous = str(status_line_state.get("last_emitted_line") or "")
+    if not line or line == previous:
+        return None
+    status_line_state["last_emitted_line"] = line
+    return {
+        "type": "statusline.updated",
+        "footer_statusline": line,
+    }
+
+
 def _update_agent_message(
     latest_agent_message_by_id: dict[str, dict[str, Any]],
     item_id: str,
@@ -418,6 +482,7 @@ def _map_notification(
     latest_plan_text_by_id: dict[str, str],
     reasoning_summary_by_id: dict[str, dict[int, str]],
     command_output_by_id: dict[str, str],
+    status_line_state: dict[str, Any],
 ) -> dict[str, Any] | None:
     if method == "thread/started":
         thread = params.get("thread")
@@ -431,6 +496,7 @@ def _map_notification(
             "thread_id": thread_id,
             "cwd": thread.get("cwd"),
             "status": thread.get("status"),
+            "footer_statusline": _build_footer_statusline(status_line_state),
         }
     if method == "turn/started":
         return {"type": "turn.started"}
@@ -466,15 +532,27 @@ def _map_notification(
         from_model = str(params.get("fromModel") or "").strip()
         to_model = str(params.get("toModel") or "").strip()
         reason = str(params.get("reason") or "").strip()
+        if to_model:
+            status_line_state["model"] = to_model
         message = "模型路由已调整"
         if from_model and to_model:
             message = f"模型已切换：{from_model} -> {to_model}"
         if reason:
             message = f"{message}（{reason}）"
+        footer_statusline = _build_footer_statusline(status_line_state)
         return {
             "type": "status.updated",
             "message": message,
+            "footer_statusline": footer_statusline,
         }
+    if method == "thread/tokenUsage/updated":
+        token_usage = params.get("tokenUsage")
+        if not isinstance(token_usage, dict):
+            return None
+        status_line_state["context_remaining_percent"] = _compute_context_remaining_percent(
+            token_usage
+        )
+        return _statusline_event_if_changed(status_line_state)
     if method == "error":
         return {
             "type": "error",
@@ -620,6 +698,28 @@ def run(args: argparse.Namespace) -> int:
     try:
         cwd = Path(args.cwd).resolve()
         client = AppServerClient.start(args.codex_bin, cwd)
+        try:
+            config_read = client.request_simple(
+                "config/read",
+                {
+                    "cwd": str(cwd),
+                    "includeLayers": False,
+                },
+            )
+        except RuntimeError:
+            config_read = {}
+        config = config_read.get("config") if isinstance(config_read, dict) else {}
+        status_line_state = {
+            "cwd": cwd,
+            "model": (
+                str((config or {}).get("model") or "").strip()
+                or str(args.model or "").strip()
+                or "loading"
+            ),
+            "reasoning_effort": (config or {}).get("modelReasoningEffort"),
+            "context_remaining_percent": 100,
+            "last_emitted_line": "",
+        }
         if args.thread_id:
             binding = client.request_simple(
                 "thread/resume",
@@ -636,7 +736,14 @@ def run(args: argparse.Namespace) -> int:
                 f"Codex 会话目录不一致：期望 {cwd}，实际 {thread_cwd}"
             )
 
-        _emit_event({"type": "thread.started", "thread_id": thread_id})
+        initial_statusline = _statusline_event_if_changed(status_line_state)
+        _emit_event(
+            {
+                "type": "thread.started",
+                "thread_id": thread_id,
+                **({"footer_statusline": initial_statusline["footer_statusline"]} if initial_statusline else {}),
+            }
+        )
         request_id = client.send_request(
             "turn/start",
             _build_turn_start_params(thread_id, args.prompt),
@@ -670,6 +777,7 @@ def run(args: argparse.Namespace) -> int:
                 latest_plan_text_by_id,
                 reasoning_summary_by_id,
                 command_output_by_id,
+                status_line_state,
             )
             if event is None:
                 continue

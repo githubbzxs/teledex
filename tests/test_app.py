@@ -84,7 +84,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertTrue(str(calls[0]["text"]).startswith("• Working (0s)"))
+        self.assertTrue(str(calls[0]["text"]).startswith("○ Working (0s)"))
 
     def test_send_run_result_never_replies_to_preview_message(self) -> None:
         active_run = ActiveRun(
@@ -153,13 +153,13 @@ class AppMessagingTestCase(unittest.TestCase):
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
-    def test_status_line_tracks_elapsed_without_blinking_marker(self) -> None:
+    def test_status_line_tracks_elapsed_with_heartbeat_marker(self) -> None:
         now = [0.0]
         preview = LivePreviewState(initial_status="Thinking", now_func=lambda: now[0])
 
-        self.assertEqual(preview.render(), "• Thinking (0s)")
+        self.assertEqual(preview.render(), "○ Thinking (0s)")
         now[0] = 5.0
-        self.assertEqual(preview.advance(), "• Thinking (5s)")
+        self.assertEqual(preview.advance(), "● Thinking (5s)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState(stream_step_chars=2)
@@ -167,11 +167,11 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "• Working (0s)\n\nOutput preview\nabcdef",
+            "○ Working (0s)\n\nOutput preview\nabcdef",
         )
         self.assertEqual(
             preview.advance(),
-            "• Working (0s)\n\nOutput preview\nabcdef",
+            "● Working (0s)\n\nOutput preview\nabcdef",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:
@@ -185,7 +185,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "• Working (5s)\n\nThoughts\n先看目录\n\n再检查配置",
+            "○ Working (5s)\n\nThoughts\n先看目录\n\n再检查配置",
         )
 
     def test_tool_output_is_rendered_in_preview(self) -> None:
@@ -194,7 +194,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "• Working (0s)\n\nTool output\nfirst line\nsecond line",
+            "○ Working (0s)\n\nTool output\nfirst line\nsecond line",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -203,7 +203,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.complete(),
-            "• Completed (0s)\n\nOutput preview\n完成内容",
+            "● Completed (0s)\n\nOutput preview\n完成内容",
         )
 
     def test_reasoning_commentary_promotes_bold_heading_to_status_line(self) -> None:
@@ -213,8 +213,31 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "• Thinking (0s)\n\nThoughts\n**Thinking**\n\nChecking files",
+            "○ Thinking (0s)\n\nThoughts\n**Thinking**\n\nChecking files",
         )
+
+    def test_footer_statusline_renders_at_bottom(self) -> None:
+        preview = LivePreviewState()
+        preview.update_footer_statusline("gpt-5.4 default · 100% left · ~/teledex")
+
+        self.assertEqual(
+            preview.render(),
+            "○ Working (0s)\n\ngpt-5.4 default · 100% left · ~/teledex",
+        )
+
+    def test_render_html_preserves_markdown_in_output_preview(self) -> None:
+        preview = LivePreviewState()
+        preview.update_stream_text("## 标题\n\n- 列表项\n\n**加粗**")
+        preview.update_footer_statusline("gpt-5.4 default · 100% left · ~/teledex")
+
+        rendered = preview.render_html()
+
+        self.assertIn("○ Working (0s)", rendered)
+        self.assertIn("<b>Output preview</b>", rendered)
+        self.assertIn("<b>标题</b>", rendered)
+        self.assertIn("• 列表项", rendered)
+        self.assertIn("<b>加粗</b>", rendered)
+        self.assertIn("gpt-5.4 default · 100% left · ~/teledex", rendered)
 
 
 if __name__ == "__main__":

@@ -132,6 +132,40 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertEqual(parsed.preview_text, "最终回复")
         self.assertEqual(parsed.final_message, "最终回复")
 
+    def test_parse_event_line_supports_footer_statusline_updates(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "statusline.updated",
+                    "footer_statusline": "gpt-5.4 default · 98% left · ~/teledex",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(
+            parsed.footer_statusline,
+            "gpt-5.4 default · 98% left · ~/teledex",
+        )
+
+    def test_parse_event_line_preserves_footer_statusline_on_thread_started(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "thread.started",
+                    "thread_id": "thread-1",
+                    "footer_statusline": "gpt-test default · 100% left · ~/teledex",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.thread_id, "thread-1")
+        self.assertEqual(
+            parsed.footer_statusline,
+            "gpt-test default · 100% left · ~/teledex",
+        )
+
     def test_build_command_uses_app_server_helper(self) -> None:
         output_file = Path(self.temp_dir.name) / "last.txt"
         command = self.runner._build_command(

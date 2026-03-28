@@ -25,6 +25,7 @@ class CodexProcessHandle:
 @dataclass(slots=True)
 class ParsedCodexEvent:
     status_text: str | None = None
+    footer_statusline: str | None = None
     preview_text: str | None = None
     commentary_id: str | None = None
     commentary_text: str | None = None
@@ -101,60 +102,69 @@ class CodexRunner:
         except json.JSONDecodeError:
             return ParsedCodexEvent()
 
+        footer_statusline = str(payload.get("footer_statusline") or "").strip() or None
+
+        def _with_footer(event: ParsedCodexEvent) -> ParsedCodexEvent:
+            if footer_statusline:
+                event.footer_statusline = footer_statusline
+            return event
+
         event_type = str(payload.get("type", ""))
         if event_type == "thread.started":
-            return ParsedCodexEvent(
+            return _with_footer(ParsedCodexEvent(
                 status_text="Working",
                 thread_id=payload.get("thread_id"),
-            )
+            ))
         if event_type == "turn.started":
-            return ParsedCodexEvent(status_text="Working")
+            return _with_footer(ParsedCodexEvent(status_text="Working"))
         if event_type == "turn.completed":
-            return ParsedCodexEvent(status_text="Working")
+            return _with_footer(ParsedCodexEvent(status_text="Working"))
+        if event_type == "statusline.updated":
+            return ParsedCodexEvent(footer_statusline=footer_statusline)
         if event_type == "turn.interrupted":
             message = _normalize_status_text(
                 str(payload.get("message") or "Interrupted")
             )
-            return ParsedCodexEvent(status_text=message or "Interrupted")
+            return _with_footer(ParsedCodexEvent(status_text=message or "Interrupted"))
         if event_type == "turn.failed":
             message = _normalize_status_text(str(payload.get("message") or "Failed"))
-            return ParsedCodexEvent(status_text=message or "Failed")
+            return _with_footer(ParsedCodexEvent(status_text=message or "Failed"))
         if event_type == "error":
             message = _normalize_status_text(str(payload.get("message") or "Failed"))
-            return ParsedCodexEvent(status_text=message or "Failed")
+            return _with_footer(ParsedCodexEvent(status_text=message or "Failed"))
         if event_type == "status.updated":
             message = _normalize_status_text(str(payload.get("message") or ""))
-            return ParsedCodexEvent(status_text=message or None)
+            return _with_footer(ParsedCodexEvent(status_text=message or None))
         if event_type == "plan.updated":
             plan_id = str(payload.get("plan_id") or "").strip()
             text = str(payload.get("text") or "").strip()
             if not plan_id or not text:
-                return ParsedCodexEvent()
-            return ParsedCodexEvent(
+                return ParsedCodexEvent(footer_statusline=footer_statusline)
+            return _with_footer(ParsedCodexEvent(
                 status_text="Working",
                 commentary_id=plan_id,
                 commentary_text=text,
-            )
+            ))
         if event_type == "reasoning.updated":
             item_id = str(payload.get("item_id") or "").strip()
             text = str(payload.get("text") or "").strip()
             if not item_id or not text:
-                return ParsedCodexEvent()
-            return ParsedCodexEvent(
+                return ParsedCodexEvent(footer_statusline=footer_statusline)
+            return _with_footer(ParsedCodexEvent(
                 status_text=extract_first_bold_markdown(text) or None,
                 commentary_id=f"reasoning:{item_id}",
                 commentary_text=text,
-            )
+            ))
         if event_type == "command.output":
             text = str(payload.get("text") or "").strip()
             if not text:
-                return ParsedCodexEvent(status_text="Working")
-            return ParsedCodexEvent(
+                return _with_footer(ParsedCodexEvent(status_text="Working"))
+            return _with_footer(ParsedCodexEvent(
                 status_text="Working",
                 tool_output_text=text,
-            )
+            ))
         if event_type.startswith("exec.command.") or event_type.startswith("patch."):
-            return ParsedCodexEvent(status_text="Working")
+            return _with_footer(ParsedCodexEvent(status_text="Working"))
 
         item = payload.get("item")
         if isinstance(item, dict):
@@ -164,26 +174,26 @@ class CodexRunner:
                 item_id = str(item.get("id", "")).strip() or None
                 phase = str(item.get("phase", "")).strip()
                 if phase == "commentary":
-                    return ParsedCodexEvent(
+                    return _with_footer(ParsedCodexEvent(
                         status_text=None,
                         commentary_id=item_id,
                         commentary_text=text or None,
-                    )
-                return ParsedCodexEvent(
+                    ))
+                return _with_footer(ParsedCodexEvent(
                     status_text="Working" if phase == "final_answer" or text else None,
                     preview_text=text or None,
                     final_message=(text or None) if event_type == "item.completed" else None,
-                )
+                ))
             if item_type == "plan":
                 text = str(item.get("text", "")).strip()
                 item_id = str(item.get("id", "")).strip() or "plan"
                 if text:
-                    return ParsedCodexEvent(
+                    return _with_footer(ParsedCodexEvent(
                         status_text="Working",
                         commentary_id=f"plan:{item_id}",
                         commentary_text=text,
-                    )
-                return ParsedCodexEvent(status_text="Working")
+                    ))
+                return _with_footer(ParsedCodexEvent(status_text="Working"))
             if item_type == "reasoning":
                 summary = item.get("summary")
                 if isinstance(summary, list):
@@ -196,27 +206,27 @@ class CodexRunner:
                     summary_text = "\n\n".join(parts).strip()
                     if summary_text:
                         item_id = str(item.get("id", "")).strip() or "reasoning"
-                        return ParsedCodexEvent(
+                        return _with_footer(ParsedCodexEvent(
                             status_text=extract_first_bold_markdown(summary_text) or None,
                             commentary_id=f"reasoning:{item_id}",
                             commentary_text=summary_text,
-                        )
+                        ))
             if item_type == "command_execution":
                 command = str(item.get("command", "")).strip()
                 aggregated_output = str(item.get("aggregatedOutput") or "").strip()
                 if aggregated_output:
-                    return ParsedCodexEvent(
+                    return _with_footer(ParsedCodexEvent(
                         status_text="Working",
                         tool_output_text=aggregated_output,
-                    )
+                    ))
                 if command:
-                    return ParsedCodexEvent(status_text="Working")
-                return ParsedCodexEvent(status_text="Working")
+                    return _with_footer(ParsedCodexEvent(status_text="Working"))
+                return _with_footer(ParsedCodexEvent(status_text="Working"))
             if "tool" in item_type or item_type in {"shell_call", "function_call"}:
-                return ParsedCodexEvent(status_text="Working")
+                return _with_footer(ParsedCodexEvent(status_text="Working"))
             if item_type in {"reasoning", "assistant_reasoning"}:
-                return ParsedCodexEvent(status_text="Thinking")
-        return ParsedCodexEvent()
+                return _with_footer(ParsedCodexEvent(status_text="Thinking"))
+        return ParsedCodexEvent(footer_statusline=footer_statusline)
 
     def read_output_file(self, output_file: Path) -> str | None:
         if not output_file.exists():

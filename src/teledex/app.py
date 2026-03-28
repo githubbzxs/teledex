@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 import threading
 import time
@@ -36,7 +37,8 @@ HELP_TEXT = """teledex 可用命令：
 使用 `//命令` 可把 `/命令` 作为 Codex 原生命令发送到当前会话。
 直接发送普通文本，即可继续当前活跃会话。"""
 
-_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 1.0
+_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 0.4
+_PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_TYPING_INTERVAL_SECONDS = 1.0
 _PREVIEW_STREAM_STEP_CHARS = 1
 _PREVIEW_HISTORY_MAX_CHARS = 2000
@@ -84,6 +86,8 @@ class LivePreviewState:
         self._commentary_order: list[str] = []
         self._commentary_text_by_id: dict[str, str] = {}
         self._tool_output_text = ""
+        self._footer_statusline = ""
+        self._frame_index = 0
         self._history_max_chars = max(1, history_max_chars)
         self._output_max_chars = max(1, output_max_chars)
         self._tool_output_max_chars = max(1, tool_output_max_chars)
@@ -146,8 +150,20 @@ class LivePreviewState:
             self._in_progress = True
             self._flush_requested = True
 
+    def update_footer_statusline(self, text: str) -> None:
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            return
+        with self._lock:
+            if normalized == self._footer_statusline:
+                return
+            self._footer_statusline = normalized
+            self._flush_requested = True
+
     def advance(self) -> str:
         with self._lock:
+            if self._in_progress:
+                self._frame_index = (self._frame_index + 1) % len(_PREVIEW_HEARTBEAT_FRAMES)
             if self._target_text and self._visible_chars < len(self._target_text):
                 self._visible_chars = min(
                     len(self._target_text),
@@ -158,6 +174,10 @@ class LivePreviewState:
     def render(self) -> str:
         with self._lock:
             return self._render_locked()
+
+    def render_html(self) -> str:
+        with self._lock:
+            return self._render_html_locked()
 
     def has_pending_stream(self) -> bool:
         with self._lock:
@@ -180,13 +200,75 @@ class LivePreviewState:
             return self._render_locked()
 
     def _render_locked(self) -> str:
+        marker = (
+            _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
+            if self._in_progress
+            else _PREVIEW_HEARTBEAT_FRAMES[-1]
+        )
         sections = [
-            f"• {self._status_text} ({_format_elapsed_compact(self._now_func() - self._started_at)})"
+            f"{marker} {self._status_text} ({_format_elapsed_compact(self._now_func() - self._started_at)})"
         ]
         body = self._build_body_locked()
         if body:
             sections.extend(["", body])
+        if self._footer_statusline:
+            sections.extend(["", self._footer_statusline])
         return "\n".join(sections).strip()
+
+    def _render_html_locked(self) -> str:
+        marker = (
+            _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
+            if self._in_progress
+            else _PREVIEW_HEARTBEAT_FRAMES[-1]
+        )
+        sections = [
+            html.escape(
+                f"{marker} {self._status_text} ({_format_elapsed_compact(self._now_func() - self._started_at)})"
+            )
+        ]
+
+        commentary = self._render_commentary_locked()
+        if commentary:
+            sections.extend(
+                [
+                    "",
+                    "<b>Thoughts</b>",
+                    markdown_to_telegram_html(commentary) or html.escape(commentary),
+                ]
+            )
+
+        tool_output = _truncate_preview_tail(
+            self._tool_output_text,
+            self._tool_output_max_chars,
+        )
+        if tool_output:
+            rendered_tool_output = html.escape(tool_output)
+            if rendered_tool_output:
+                rendered_tool_output += "\n"
+            sections.extend(
+                [
+                    "",
+                    "<b>Tool output</b>",
+                    f"<pre><code>{rendered_tool_output}</code></pre>",
+                ]
+            )
+
+        output_text = _truncate_preview_text(
+            self._target_text[: self._visible_chars],
+            self._output_max_chars,
+        )
+        if output_text:
+            sections.extend(
+                [
+                    "",
+                    "<b>Output preview</b>",
+                    markdown_to_telegram_html(output_text) or html.escape(output_text),
+                ]
+            )
+
+        if self._footer_statusline:
+            sections.extend(["", html.escape(self._footer_statusline)])
+        return "\n".join(section for section in sections if section is not None).strip()
 
     def _build_body_locked(self) -> str:
         sections: list[str] = []
@@ -626,6 +708,8 @@ class TeledexApp:
                     )
                 if parsed.tool_output_text:
                     preview_state.update_tool_output(parsed.tool_output_text)
+                if parsed.footer_statusline:
+                    preview_state.update_footer_statusline(parsed.footer_statusline)
                 if parsed.preview_text:
                     preview_state.update_stream_text(parsed.preview_text)
                 if parsed.status_text:
@@ -738,7 +822,16 @@ class TeledexApp:
 
             text = preview_state.advance()
             if text and text != last_preview_text:
-                self._update_preview(active_run, text, prefer_html=True)
+                rendered_html = preview_state.render_html()
+                if rendered_html and self._edit_preview_message(
+                    active_run,
+                    rendered_html,
+                    parse_mode="HTML",
+                ):
+                    last_preview_text = text
+                    preview_state.mark_rendered()
+                    continue
+                self._update_preview(active_run, text, prefer_html=False)
                 last_preview_text = text
                 preview_state.mark_rendered()
 
@@ -765,7 +858,18 @@ class TeledexApp:
     ) -> None:
         deadline = time.monotonic() + _PREVIEW_DRAIN_TIMEOUT_SECONDS
         while preview_state.has_pending_stream() and time.monotonic() < deadline:
-            self._update_preview(active_run, preview_state.advance(), prefer_html=True)
+            text = preview_state.advance()
+            rendered_html = preview_state.render_html()
+            if rendered_html and self._edit_preview_message(
+                active_run,
+                rendered_html,
+                parse_mode="HTML",
+            ):
+                preview_state.mark_rendered()
+                time.sleep(_PREVIEW_STREAM_INTERVAL_SECONDS)
+                continue
+            self._update_preview(active_run, text, prefer_html=False)
+            preview_state.mark_rendered()
             time.sleep(_PREVIEW_STREAM_INTERVAL_SECONDS)
 
     def _update_preview(
