@@ -52,12 +52,12 @@ def _normalize_status_text(text: str) -> str:
     if not normalized:
         return ""
     return {
-        "正在准备会话...": "Working",
+        "正在准备会话...": "Thinking",
         "正在思考...": "Thinking",
-        "正在整理回复...": "Working",
-        "正在调用工具...": "Working",
-        "正在执行命令...": "Working",
-        "工具执行完成": "Working",
+        "正在整理回复...": "Thinking",
+        "正在调用工具...": "Thinking",
+        "正在执行命令...": "Thinking",
+        "工具执行完成": "Thinking",
         "任务已中断": "Interrupted",
         "执行失败": "Failed",
         "已停止": "Stopped",
@@ -183,14 +183,14 @@ class CodexRunner:
         if event_type == "thread.started":
             return _with_footer(
                 ParsedCodexEvent(
-                    status_text="Working",
+                    status_text="Thinking",
                     thread_id=payload.get("thread_id"),
                 )
             )
         if event_type == "turn.started":
-            return _with_footer(ParsedCodexEvent(status_text="Working"))
+            return _with_footer(ParsedCodexEvent(status_text="Thinking"))
         if event_type == "turn.completed":
-            return _with_footer(ParsedCodexEvent(status_text="Working"))
+            return _with_footer(ParsedCodexEvent(status_text="Thinking"))
         if event_type == "statusline.updated":
             return ParsedCodexEvent(footer_statusline=footer_statusline)
         if event_type == "turn.interrupted":
@@ -213,16 +213,16 @@ class CodexRunner:
             text = str(payload.get("text") or "").rstrip()
             item_id = str(payload.get("item_id") or "").strip() or None
             if not text:
-                return _with_footer(ParsedCodexEvent(status_text="Working"))
+                return _with_footer(ParsedCodexEvent(status_text="Thinking"))
             return _with_footer(
                 ParsedCodexEvent(
-                    status_text="Working",
+                    status_text="Thinking",
                     tool_call_id=item_id,
                     tool_output_text=text,
                 )
             )
         if event_type.startswith("exec.command.") or event_type.startswith("patch."):
-            return _with_footer(ParsedCodexEvent(status_text="Working"))
+            return _with_footer(ParsedCodexEvent(status_text="Thinking"))
 
         item = payload.get("item")
         if isinstance(item, dict):
@@ -244,7 +244,7 @@ class CodexRunner:
                     )
                 return _with_footer(
                     ParsedCodexEvent(
-                        status_text="Working" if phase == "final_answer" or text else None,
+                        status_text="Thinking" if phase == "final_answer" or text else None,
                         preview_text=text or None,
                         final_message=(text or None) if event_type == "item.completed" else None,
                     )
@@ -260,15 +260,15 @@ class CodexRunner:
                 if aggregated_output or command:
                     return _with_footer(
                         ParsedCodexEvent(
-                            status_text="Working",
+                            status_text="Thinking",
                             tool_call_id=item_id,
                             tool_command_text=command or None,
                             tool_output_text=aggregated_output or None,
                         )
                     )
-                return _with_footer(ParsedCodexEvent(status_text="Working"))
+                return _with_footer(ParsedCodexEvent(status_text="Thinking"))
             if "tool" in item_type or item_type in {"shell_call", "function_call"}:
-                return _with_footer(ParsedCodexEvent(status_text="Working"))
+                return _with_footer(ParsedCodexEvent(status_text="Thinking"))
             if item_type in {"reasoning", "assistant_reasoning"}:
                 return _with_footer(ParsedCodexEvent(status_text="Thinking"))
         return ParsedCodexEvent(footer_statusline=footer_statusline)

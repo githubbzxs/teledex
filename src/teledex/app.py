@@ -86,12 +86,12 @@ class ActiveRun:
 class LivePreviewState:
     def __init__(
         self,
-        initial_status: str = "Working",
+        initial_status: str = "Thinking",
         history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
         output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
         tool_output_max_chars: int = _PREVIEW_TOOL_OUTPUT_MAX_CHARS,
     ) -> None:
-        self._status_text = initial_status.strip() or "Working"
+        self._status_text = initial_status.strip() or "Thinking"
         self._target_text = ""
         self._commentary_order: list[str] = []
         self._commentary_text_by_id: dict[str, str] = {}
@@ -157,13 +157,6 @@ class LivePreviewState:
                 for current_id in self._commentary_order
                 if current_id != normalized_id
             ]
-            if (
-                not self._commentary_order
-                and not self._target_text
-                and not self._tool_order
-                and self._status_text == "Thinking"
-            ):
-                self._status_text = "Working"
             self._flush_requested = True
 
     def update_tool_state(
@@ -859,7 +852,7 @@ class TeledexApp:
                 final_message = "已完成，但没有捕获到最终回复。"
 
             preview_state.update_stream_text(final_message)
-            preview_state.update_status("Working")
+            preview_state.update_status("Thinking")
             self._stop_preview_loop(preview_stop_event, preview_worker)
             self._drain_preview_stream(active_run, preview_state)
             self._send_run_result(active_run, final_message, preview_state)

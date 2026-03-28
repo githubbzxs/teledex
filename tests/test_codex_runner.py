@@ -146,7 +146,7 @@ class CodexRunnerTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(parsed.status_text, "Working")
+        self.assertEqual(parsed.status_text, "Thinking")
         self.assertEqual(parsed.tool_call_id, "cmd_1")
         self.assertEqual(parsed.tool_output_text, "line1\nline2")
 

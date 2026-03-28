@@ -94,7 +94,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertEqual(str(calls[0]["text"]), "○ Working (0m)")
+        self.assertEqual(str(calls[0]["text"]), "○ Thinking (0m)")
 
     def test_send_run_result_never_replies_to_preview_message(self) -> None:
         active_run = ActiveRun(
@@ -331,7 +331,7 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["○ Working (0m)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
@@ -557,7 +557,7 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["○ Working (0m)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
@@ -653,7 +653,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0m)\n\nabcdef",
+            "○ Thinking (0m)\n\nabcdef",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:
@@ -661,11 +661,11 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         preview.update_commentary("msg_1", "先看目录")
         preview.update_commentary("msg_2", "再检查配置")
-        preview.update_status("Working")
+        preview.update_status("Thinking")
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0m)\n\n先看目录\n\n再检查配置",
+            "○ Thinking (0m)\n\n先看目录\n\n再检查配置",
         )
 
     def test_command_output_is_rendered_in_preview(self) -> None:
@@ -678,7 +678,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0m)",
+            "○ Thinking (0m)",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -696,7 +696,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0m)\n\n**Thinking**\n\nChecking files",
+            "○ Thinking (0m)\n\n**Thinking**\n\nChecking files",
         )
 
     def test_footer_statusline_renders_at_bottom(self) -> None:
@@ -705,7 +705,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0m)\n\ngpt-5.4 default · 100% left · ~/teledex",
+            "○ Thinking (0m)\n\ngpt-5.4 default · 100% left · ~/teledex",
         )
 
     def test_final_stream_clears_transient_sections(self) -> None:
@@ -716,7 +716,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0m)\n\n先检查 README\n\n最终输出",
+            "○ Thinking (0m)\n\n先检查 README\n\n最终输出",
         )
 
     def test_complete_clears_transient_sections_and_keeps_final_output(self) -> None:
@@ -832,7 +832,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         app._update_preview = fake_update_preview  # type: ignore[method-assign]
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
-        self.assertEqual(attempts, ["○ Working (0m)\n\n实时过程"])
+        self.assertEqual(attempts, ["○ Thinking (0m)\n\n实时过程"])
         self.assertFalse(preview.has_pending_stream())
 
     def test_preview_loop_does_not_advance_animation_while_flushing_stream(self) -> None:
@@ -897,7 +897,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         app._update_preview = fake_update_preview  # type: ignore[method-assign]
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
-        self.assertEqual(attempts, ["● Working (0m)\n\n继续思考"])
+        self.assertEqual(attempts, ["● Thinking (0m)\n\n继续思考"])
 
     def test_final_html_only_renders_final_answer_markdown(self) -> None:
         preview = LivePreviewState()
