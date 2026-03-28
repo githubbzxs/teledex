@@ -44,11 +44,6 @@ _PREVIEW_OUTPUT_MAX_CHARS = 2200
 _PREVIEW_MESSAGE_MAX_CHARS = 3800
 _PREVIEW_LOOP_IDLE_SECONDS = 0.1
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
-_CODEX_LANGUAGE_INSTRUCTION = (
-    "请使用简体中文输出实际内容。"
-    "像 Thinking、Planning 这样的标题可以保留英文，"
-    "但标题下的正文说明、过程描述和最终答复都请使用简体中文。"
-)
 _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "查看帮助"),
     ("tnew", "新建会话"),
@@ -381,13 +376,6 @@ def _next_preview_deadline(
     while deadline <= now:
         deadline += interval_seconds
     return deadline
-
-
-def _decorate_codex_prompt(prompt: str) -> str:
-    normalized = prompt.strip()
-    if not normalized:
-        return _CODEX_LANGUAGE_INSTRUCTION
-    return f"{_CODEX_LANGUAGE_INSTRUCTION}\n\n{normalized}"
 
 
 class TeledexApp:
@@ -750,7 +738,7 @@ class TeledexApp:
                 raise RuntimeError("会话未绑定目录")
 
             handle = self.runner.start(
-                prompt=_decorate_codex_prompt(active_run.prompt),
+                prompt=active_run.prompt,
                 cwd=Path(session.bound_path),
                 thread_id=session.codex_thread_id,
                 runtime_dir=self.config.state_dir / "runtime",

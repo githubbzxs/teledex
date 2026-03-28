@@ -199,29 +199,9 @@ class CodexRunner:
             message = _normalize_status_text(str(payload.get("message") or ""))
             return _with_footer(ParsedCodexEvent(status_text=message or None))
         if event_type == "plan.updated":
-            plan_id = str(payload.get("plan_id") or "").strip()
-            text = str(payload.get("text") or "").rstrip()
-            if not plan_id or not text:
-                return ParsedCodexEvent(footer_statusline=footer_statusline)
-            return _with_footer(
-                ParsedCodexEvent(
-                    status_text="Working",
-                    commentary_id=plan_id,
-                    commentary_text=text,
-                )
-            )
+            return ParsedCodexEvent(footer_statusline=footer_statusline)
         if event_type == "reasoning.updated":
-            item_id = str(payload.get("item_id") or "").strip()
-            text = str(payload.get("text") or "").rstrip()
-            if not item_id or not text:
-                return ParsedCodexEvent(footer_statusline=footer_statusline)
-            return _with_footer(
-                ParsedCodexEvent(
-                    status_text="Thinking",
-                    commentary_id=f"reasoning:{item_id}",
-                    commentary_text=text,
-                )
-            )
+            return ParsedCodexEvent(footer_statusline=footer_statusline)
         if event_type == "command.output":
             text = str(payload.get("text") or "").rstrip()
             item_id = str(payload.get("item_id") or "").strip() or None
@@ -263,53 +243,9 @@ class CodexRunner:
                     )
                 )
             if item_type == "plan":
-                text = str(item.get("text", "")).rstrip()
-                item_id = str(item.get("id", "")).strip() or "plan"
-                if text:
-                    return _with_footer(
-                        ParsedCodexEvent(
-                            status_text="Thinking",
-                            commentary_id=f"plan:{item_id}",
-                            commentary_text=text,
-                            commentary_completed_id=(
-                                f"plan:{item_id}"
-                                if event_type == "item.completed"
-                                else None
-                            ),
-                        )
-                    )
-                return _with_footer(ParsedCodexEvent(status_text="Working"))
+                return ParsedCodexEvent(footer_statusline=footer_statusline)
             if item_type == "reasoning":
-                summary = item.get("summary")
-                if isinstance(summary, list):
-                    parts = []
-                    for section in summary:
-                        if isinstance(section, dict):
-                            text = str(section.get("text") or "").rstrip()
-                            if text:
-                                parts.append(text)
-                    summary_text = "\n\n".join(parts).rstrip()
-                    if summary_text:
-                        item_id = str(item.get("id", "")).strip() or "reasoning"
-                        return _with_footer(
-                            ParsedCodexEvent(
-                                status_text="Thinking",
-                                commentary_id=f"reasoning:{item_id}",
-                                commentary_text=summary_text,
-                                commentary_completed_id=(
-                                    f"reasoning:{item_id}"
-                                    if event_type == "item.completed"
-                                    else None
-                                ),
-                            )
-                        )
-                if event_type == "item.completed":
-                    item_id = str(item.get("id", "")).strip() or "reasoning"
-                    return _with_footer(
-                        ParsedCodexEvent(
-                            commentary_completed_id=f"reasoning:{item_id}",
-                        )
-                    )
+                return ParsedCodexEvent(footer_statusline=footer_statusline)
             if item_type == "command_execution":
                 item_id = str(item.get("id", "")).strip() or None
                 command = str(item.get("command", "")).strip()
