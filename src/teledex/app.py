@@ -53,6 +53,19 @@ _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("tpwd", "当前目录"),
     ("tstop", "停止任务"),
 )
+_LOCAL_COMMANDS = {
+    "/start",
+    "/help",
+    "/tnew",
+    "/tsessions",
+    "/tuse",
+    "/tbind",
+    "/tpwd",
+    "/tstop",
+}
+_MIRRORED_CODEX_COMMANDS = {
+    "/new",
+}
 
 
 def _session_title_from_path(path: Path) -> str:
@@ -390,18 +403,14 @@ class TeledexApp:
         self._update_offset: int | None = None
 
     def _is_local_command(self, text: str) -> bool:
+        return self._extract_command(text) in _LOCAL_COMMANDS
+
+    def _is_mirrored_codex_command(self, text: str) -> bool:
+        return self._extract_command(text) in _MIRRORED_CODEX_COMMANDS
+
+    def _extract_command(self, text: str) -> str:
         command_text = text.split()[0]
-        command = command_text.split("@", 1)[0].lower()
-        return command in {
-            "/start",
-            "/help",
-            "/tnew",
-            "/tsessions",
-            "/tuse",
-            "/tbind",
-            "/tpwd",
-            "/tstop",
-        }
+        return command_text.split("@", 1)[0].lower()
 
     def run_forever(self) -> None:
         bot = self.telegram.get_me()
@@ -468,6 +477,10 @@ class TeledexApp:
             self._handle_command(incoming)
             return
 
+        if incoming.text.startswith("/") and self._is_mirrored_codex_command(incoming.text):
+            self._handle_codex_command(incoming)
+            return
+
         self._handle_prompt(incoming)
 
     def _normalize_incoming_message(self, incoming: IncomingMessage) -> IncomingMessage:
@@ -483,7 +496,7 @@ class TeledexApp:
 
     def _handle_command(self, incoming: IncomingMessage) -> None:
         command_text = incoming.text.split()[0]
-        command = command_text.split("@", 1)[0].lower()
+        command = self._extract_command(incoming.text)
         args = incoming.text[len(command_text) :].strip()
 
         if command in {"/help", "/start"}:
@@ -716,6 +729,49 @@ class TeledexApp:
             f"未知命令：{command}\n\n{HELP_TEXT}",
             incoming.message_thread_id,
         )
+
+    def _handle_codex_command(self, incoming: IncomingMessage) -> None:
+        command = self._extract_command(incoming.text)
+
+        if command == "/new":
+            self._handle_codex_new_command(incoming)
+            return
+
+        self._handle_prompt(incoming)
+
+    def _handle_codex_new_command(self, incoming: IncomingMessage) -> None:
+        session = self.storage.get_active_session(
+            incoming.user_id,
+            incoming.chat_id,
+            incoming.message_thread_id,
+        )
+        if session is None:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前没有活跃会话，请先用 /tnew 创建，或用 /tuse 切换。",
+                incoming.message_thread_id,
+            )
+            return
+        if self._is_session_running(session.id):
+            self._safe_send_message(
+                incoming.chat_id,
+                f"会话 #{session.id} 正在执行中，/new 暂时不可用，请稍后或先 /tstop。",
+                incoming.message_thread_id,
+            )
+            return
+
+        self.storage.clear_session_thread_id(session.id)
+        if session.bound_path:
+            message = (
+                f"已在会话 #{session.id} 中开启新的 Codex 对话。\n"
+                f"目录保持不变：{session.bound_path}"
+            )
+        else:
+            message = (
+                f"已在会话 #{session.id} 中开启新的 Codex 对话。\n"
+                "当前会话还没有绑定目录，请先用 /tbind <绝对路径>。"
+            )
+        self._safe_send_message(incoming.chat_id, message, incoming.message_thread_id)
 
     def _handle_prompt(self, incoming: IncomingMessage) -> None:
         session = self.storage.get_active_session(

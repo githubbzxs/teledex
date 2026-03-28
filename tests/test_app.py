@@ -561,10 +561,11 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
-    def test_handle_update_routes_unknown_slash_command_to_prompt(self) -> None:
+    def test_handle_update_routes_new_command_to_codex_command_handler(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         prompts: list[str] = []
         commands: list[str] = []
+        codex_commands: list[str] = []
 
         def fake_handle_prompt(incoming: IncomingMessage) -> None:
             prompts.append(incoming.text)
@@ -572,8 +573,12 @@ class AppMessagingTestCase(unittest.TestCase):
         def fake_handle_command(incoming: IncomingMessage) -> None:
             commands.append(incoming.text)
 
+        def fake_handle_codex_command(incoming: IncomingMessage) -> None:
+            codex_commands.append(incoming.text)
+
         self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
         self.app._handle_command = fake_handle_command  # type: ignore[method-assign]
+        self.app._handle_codex_command = fake_handle_codex_command  # type: ignore[method-assign]
 
         self.app._handle_update(
             {
@@ -588,8 +593,45 @@ class AppMessagingTestCase(unittest.TestCase):
             }
         )
 
-        self.assertEqual(prompts, ["/new"])
+        self.assertEqual(prompts, [])
         self.assertEqual(commands, [])
+        self.assertEqual(codex_commands, ["/new"])
+
+    def test_handle_update_keeps_other_unknown_slash_command_as_prompt(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        prompts: list[str] = []
+        commands: list[str] = []
+        codex_commands: list[str] = []
+
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming.text)
+
+        def fake_handle_command(incoming: IncomingMessage) -> None:
+            commands.append(incoming.text)
+
+        def fake_handle_codex_command(incoming: IncomingMessage) -> None:
+            codex_commands.append(incoming.text)
+
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+        self.app._handle_command = fake_handle_command  # type: ignore[method-assign]
+        self.app._handle_codex_command = fake_handle_codex_command  # type: ignore[method-assign]
+
+        self.app._handle_update(
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 457,
+                    "text": "/model",
+                    "from": {"id": 1},
+                    "chat": {"id": 100},
+                    "message_thread_id": 9,
+                },
+            }
+        )
+
+        self.assertEqual(prompts, ["/model"])
+        self.assertEqual(commands, [])
+        self.assertEqual(codex_commands, [])
 
     def test_handle_update_routes_local_management_command(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -620,6 +662,96 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(prompts, [])
         self.assertEqual(commands, ["/tbind /root/demo"])
+
+    def test_handle_codex_new_command_clears_current_thread_binding(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "thread-123")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+
+        messages: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=999,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/new",
+                message_id=123,
+                message_thread_id=9,
+            )
+        )
+
+        updated = self.app.storage.get_session(session.id, 1)
+        assert updated is not None
+        self.assertIsNone(updated.codex_thread_id)
+        self.assertEqual(updated.bound_path, self.temp_dir.name)
+        self.assertEqual(messages, [f"已在会话 #{session.id} 中开启新的 Codex 对话。\n目录保持不变：{self.temp_dir.name}"])
+
+    def test_handle_codex_new_command_rejects_running_session(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "thread-123")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        self.app._active_runs[session.id] = ActiveRun(
+            run_id=1,
+            session_id=session.id,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+        )
+
+        messages: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1000,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/new",
+                message_id=124,
+                message_thread_id=9,
+            )
+        )
+
+        updated = self.app.storage.get_session(session.id, 1)
+        assert updated is not None
+        self.assertEqual(updated.codex_thread_id, "thread-123")
+        self.assertEqual(
+            messages,
+            [f"会话 #{session.id} 正在执行中，/new 暂时不可用，请稍后或先 /tstop。"],
+        )
 
 
 class LivePreviewStateTestCase(unittest.TestCase):

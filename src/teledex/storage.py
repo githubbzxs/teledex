@@ -346,6 +346,19 @@ class Storage:
             )
             self._conn.commit()
 
+    def clear_session_thread_id(self, session_id: int) -> None:
+        now = _utc_now()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET codex_thread_id = NULL, status = 'idle', updated_at = ?, last_active_at = ?
+                WHERE id = ?
+                """,
+                (now, now, session_id),
+            )
+            self._conn.commit()
+
     def update_session_status(self, session_id: int, status: str) -> None:
         now = _utc_now()
         with self._lock:
