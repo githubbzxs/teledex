@@ -919,8 +919,9 @@ class TeledexApp:
                 next_heartbeat_at += heartbeat_interval
 
             if has_pending_stream or animation_ticks > 0 or heartbeat_ticks > 0:
+                animate_steps = 0 if has_pending_stream else animation_ticks
                 text = preview_state.advance(
-                    animate_steps=animation_ticks,
+                    animate_steps=animate_steps,
                     elapsed_seconds=heartbeat_step_seconds * heartbeat_ticks,
                 )
                 preview_synced = text == last_preview_text
@@ -934,6 +935,7 @@ class TeledexApp:
                         last_preview_text = text
                 if has_pending_stream and preview_synced:
                     preview_state.mark_rendered()
+                    next_animation_at = time.monotonic() + animation_interval
 
     def _stop_preview_loop(
         self,
