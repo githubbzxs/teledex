@@ -72,7 +72,6 @@ class ActiveRun:
     chat_id: int
     message_thread_id: int | None
     prompt: str
-    source_message_id: int | None = None
     preview_message_id: int | None = None
     process_handle: CodexProcessHandle | None = None
     stop_requested: bool = False
@@ -711,7 +710,6 @@ class TeledexApp:
             chat_id=incoming.chat_id,
             message_thread_id=incoming.message_thread_id,
             prompt=incoming.text,
-            source_message_id=incoming.message_id,
             preview_message_id=preview.message_id if preview else None,
         )
         with self._active_runs_lock:
@@ -1025,45 +1023,19 @@ class TeledexApp:
         text: str,
         preview_state: LivePreviewState | None = None,
     ) -> None:
-        delivered_by_preview_edit = False
         if preview_state is not None:
             preview_state.update_stream_text(text)
             preview_state.complete()
             if self._render_finished_preview(active_run, preview_state):
-                delivered_by_preview_edit = True
-            else:
-                inline_text, parse_mode = self._build_inline_result(text)
-                if self._edit_preview_message(active_run, inline_text, parse_mode=parse_mode):
-                    delivered_by_preview_edit = True
-                else:
-                    self._safe_send_message(
-                        active_run.chat_id,
-                        inline_text,
-                        active_run.message_thread_id,
-                        parse_mode=parse_mode,
-                    )
-        else:
-            inline_text, parse_mode = self._build_inline_result(text)
-            if self._edit_preview_message(active_run, inline_text, parse_mode=parse_mode):
-                delivered_by_preview_edit = True
-            else:
-                self._safe_send_message(
-                    active_run.chat_id,
-                    inline_text,
-                    active_run.message_thread_id,
-                    parse_mode=parse_mode,
-                )
-        if delivered_by_preview_edit:
-            self._send_completion_notice(active_run)
-
-    def _send_completion_notice(self, active_run: ActiveRun) -> None:
-        if active_run.source_message_id is None:
+                return
+        inline_text, parse_mode = self._build_inline_result(text)
+        if self._edit_preview_message(active_run, inline_text, parse_mode=parse_mode):
             return
         self._safe_send_message(
             active_run.chat_id,
-            f"会话 #{active_run.session_id} 已完成。",
+            inline_text,
             active_run.message_thread_id,
-            reply_to_message_id=active_run.source_message_id,
+            parse_mode=parse_mode,
         )
 
     def _build_inline_result(self, text: str) -> tuple[str, str | None]:

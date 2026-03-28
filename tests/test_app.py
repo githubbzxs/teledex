@@ -107,7 +107,6 @@ class AppMessagingTestCase(unittest.TestCase):
             preview_message_id=456,
         )
         calls: list[dict[str, object]] = []
-        notices: list[dict[str, object]] = []
 
         def fake_edit_preview_message(
             active_run: ActiveRun,
@@ -124,34 +123,10 @@ class AppMessagingTestCase(unittest.TestCase):
             )
             return True
 
-        def fake_send_message(
-            chat_id: int,
-            text: str,
-            message_thread_id: int | None,
-            reply_to_message_id: int | None = None,
-            parse_mode: str | None = None,
-        ) -> TelegramMessage:
-            notices.append(
-                {
-                    "chat_id": chat_id,
-                    "text": text,
-                    "message_thread_id": message_thread_id,
-                    "reply_to_message_id": reply_to_message_id,
-                    "parse_mode": parse_mode,
-                }
-            )
-            return TelegramMessage(
-                chat_id=chat_id,
-                message_id=789,
-                message_thread_id=message_thread_id,
-            )
-
         self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
-        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(len(calls), 1)
-        self.assertEqual(notices, [])
         self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertEqual(calls[0]["parse_mode"], "HTML")
 
@@ -192,65 +167,6 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertIn("gpt-5.4 default · 98% left · ~/teledex", str(calls[0]["text"]))
         self.assertEqual(calls[0]["parse_mode"], "HTML")
-
-    def test_send_run_result_sends_completion_notice_after_preview_edit(self) -> None:
-        active_run = ActiveRun(
-            run_id=1,
-            session_id=3,
-            user_id=1,
-            chat_id=100,
-            message_thread_id=9,
-            prompt="任务",
-            source_message_id=123,
-            preview_message_id=456,
-        )
-        preview = LivePreviewState()
-        edit_calls: list[dict[str, object]] = []
-        notices: list[dict[str, object]] = []
-
-        def fake_edit_preview_message(
-            active_run: ActiveRun,
-            text: str,
-            parse_mode: str | None = None,
-        ) -> bool:
-            edit_calls.append(
-                {
-                    "text": text,
-                    "parse_mode": parse_mode,
-                }
-            )
-            return True
-
-        def fake_send_message(
-            chat_id: int,
-            text: str,
-            message_thread_id: int | None,
-            reply_to_message_id: int | None = None,
-            parse_mode: str | None = None,
-        ) -> TelegramMessage:
-            notices.append(
-                {
-                    "chat_id": chat_id,
-                    "text": text,
-                    "message_thread_id": message_thread_id,
-                    "reply_to_message_id": reply_to_message_id,
-                    "parse_mode": parse_mode,
-                }
-            )
-            return TelegramMessage(
-                chat_id=chat_id,
-                message_id=999,
-                message_thread_id=message_thread_id,
-            )
-
-        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
-        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
-        self.app._send_run_result(active_run, "最终回复", preview)
-
-        self.assertEqual(len(edit_calls), 1)
-        self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0]["text"], "会话 #3 已完成。")
-        self.assertEqual(notices[0]["reply_to_message_id"], 123)
 
     def test_handle_prompt_allows_other_session_to_run_in_parallel(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
