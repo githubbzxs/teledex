@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import hashlib
+import os
 import re
 import shlex
 import subprocess
@@ -15,6 +16,19 @@ from typing import Any, Callable
 
 from .config import AppConfig
 from .codex_app_server_exec import AppServerClient
+
+_SYNCED_ENV_KEYS_VAR = "__TELEDEX_SYNCED_ENV_KEYS"
+_SHELL_MANAGED_ENV_KEYS = {
+    "COLUMNS",
+    "LINES",
+    "OLDPWD",
+    "PWD",
+    "SHLVL",
+    "TMUX",
+    "TMUX_PANE",
+    "_",
+}
+_SHELL_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(slots=True)
@@ -572,10 +586,56 @@ class CodexRunner:
         return command
 
     def _build_shell_command(self, cwd: Path, command: list[str]) -> str:
-        return "cd {cwd} && {command}".format(
+        shell_body = "cd {cwd} && {command}".format(
+            sync_env=self._build_shell_env_sync_command(),
             cwd=shlex.quote(str(cwd)),
             command=" ".join(shlex.quote(part) for part in command),
         )
+        exact_env_command = self._build_exact_env_command(shell_body)
+        return "{sync_env}{command}".format(
+            sync_env=self._build_shell_env_sync_command(),
+            command=exact_env_command,
+        )
+
+    def _build_shell_env_sync_command(self) -> str:
+        syncable_env = self._build_syncable_env()
+        keys = sorted(syncable_env)
+        names_blob = " ".join(keys)
+        commands = [
+            f"for __teledex_env_key in ${{{_SYNCED_ENV_KEYS_VAR}-}}; do "
+            f'case " {names_blob} " in '
+            '*" ${__teledex_env_key} "*) ;; '
+            '*) unset "$__teledex_env_key" ;; '
+            "esac; "
+            "done"
+        ]
+        commands.extend(
+            f"export {key}={shlex.quote(value)}" for key, value in sorted(syncable_env.items())
+        )
+        commands.append(f"export {_SYNCED_ENV_KEYS_VAR}={shlex.quote(names_blob)}")
+        commands.append("unset __teledex_env_key")
+        return "; ".join(commands) + "; "
+
+    def _build_exact_env_command(self, shell_body: str) -> str:
+        syncable_env = self._build_syncable_env()
+        env_args = " ".join(
+            f"{key}={shlex.quote(value)}" for key, value in sorted(syncable_env.items())
+        )
+        return "env -i {env_args} {shell} -lc {shell_body}".format(
+            env_args=env_args,
+            shell=shlex.quote(self.config.tmux_shell),
+            shell_body=shlex.quote(shell_body),
+        )
+
+    def _build_syncable_env(self) -> dict[str, str]:
+        syncable_env = {
+            key: value
+            for key, value in os.environ.items()
+            if _SHELL_ENV_KEY_RE.match(key) and key not in _SHELL_MANAGED_ENV_KEYS
+        }
+        syncable_env.setdefault("HOME", str(Path.home()))
+        syncable_env.setdefault("PATH", os.defpath)
+        return syncable_env
 
     def _tmux_session_name(self, session_id: int, cwd: Path | None = None) -> str:
         if cwd is None:

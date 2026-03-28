@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from teledex.codex_runner import CodexRunner
 from teledex.config import AppConfig
@@ -256,6 +258,34 @@ class CodexRunnerTestCase(unittest.TestCase):
         session_name = self.runner._tmux_session_name(2, Path("/root/teledex"))
 
         self.assertTrue(session_name.startswith("teledex-teledex-"))
+
+    def test_build_shell_command_syncs_service_environment_into_tmux_shell(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": "/root",
+                "PATH": "/usr/local/bin:/usr/bin",
+                "GH_TOKEN": "gh-test-token",
+                "GITHUB_TOKEN": "github-test-token",
+                "CUSTOM_VALUE": "hello world",
+            },
+            clear=True,
+        ):
+            shell_command = self.runner._build_shell_command(
+                Path("/root/freecodex"),
+                ["python3", "-c", "print('ok')"],
+            )
+
+        self.assertIn("export GH_TOKEN=gh-test-token", shell_command)
+        self.assertIn("export GITHUB_TOKEN=github-test-token", shell_command)
+        self.assertIn("export CUSTOM_VALUE='hello world'", shell_command)
+        self.assertIn("export __TELEDEX_SYNCED_ENV_KEYS=", shell_command)
+        self.assertIn("env -i", shell_command)
+        self.assertIn("GH_TOKEN=gh-test-token", shell_command)
+        self.assertIn("GITHUB_TOKEN=github-test-token", shell_command)
+        self.assertIn("/bin/bash -lc", shell_command)
+        self.assertIn("cd /root/freecodex && python3 -c", shell_command)
+        self.assertIn("print(", shell_command)
 
 
 if __name__ == "__main__":
