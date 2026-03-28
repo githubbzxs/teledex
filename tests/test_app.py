@@ -271,6 +271,56 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(prompts, ["/status"])
         self.assertEqual(commands, [])
 
+    def test_handle_prompt_uses_thread_scoped_active_session(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session_1 = self.app.storage.create_session(1, "会话一")
+        session_2 = self.app.storage.create_session(1, "会话二")
+        self.app.storage.bind_session_path(session_1.id, 1, self.temp_dir.name)
+        self.app.storage.bind_session_path(session_2.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session_1.id, chat_id=100, message_thread_id=9)
+        self.app.storage.set_active_session(1, session_2.id, chat_id=100, message_thread_id=10)
+        self.app._active_runs[session_2.id] = ActiveRun(
+            run_id=2,
+            session_id=session_2.id,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=10,
+            prompt="session 2",
+            preview_message_id=222,
+        )
+
+        calls: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            calls.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=987,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        incoming = IncomingMessage(
+            chat_id=100,
+            user_id=1,
+            text="在话题 9 继续",
+            message_id=999,
+            message_thread_id=9,
+        )
+
+        with patch("teledex.app.threading.Thread", _FakeThread):
+            self.app._handle_prompt(incoming)
+
+        self.assertEqual(calls, ["○ Working (0m)"])
+        self.assertIn(session_1.id, self.app._active_runs)
+        self.assertIn(session_2.id, self.app._active_runs)
+
     def test_handle_update_routes_unknown_slash_command_to_prompt(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         prompts: list[str] = []

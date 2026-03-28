@@ -494,6 +494,12 @@ class TeledexApp:
         if command == "/tnew":
             title = args or f"会话 {len(self.storage.list_sessions(incoming.user_id)) + 1}"
             session = self.storage.create_session(incoming.user_id, title)
+            self.storage.set_active_session(
+                incoming.user_id,
+                session.id,
+                chat_id=incoming.chat_id,
+                message_thread_id=incoming.message_thread_id,
+            )
             self._safe_send_message(
                 incoming.chat_id,
                 f"已创建会话 #{session.id}\n标题：{session.title}\n接下来请先用 /tbind 绑定目录。",
@@ -513,7 +519,12 @@ class TeledexApp:
                 return
 
             lines = ["你的会话列表："]
-            active_id = user.active_session_id if user else None
+            active_session = self.storage.get_active_session(
+                incoming.user_id,
+                incoming.chat_id,
+                incoming.message_thread_id,
+            )
+            active_id = active_session.id if active_session else (user.active_session_id if user else None)
             for session in sessions:
                 active_mark = " <- 当前" if session.id == active_id else ""
                 path = session.bound_path or "未绑定目录"
@@ -555,7 +566,12 @@ class TeledexApp:
                     incoming.message_thread_id,
                 )
                 return
-            self.storage.set_active_session(incoming.user_id, session_id)
+            self.storage.set_active_session(
+                incoming.user_id,
+                session_id,
+                chat_id=incoming.chat_id,
+                message_thread_id=incoming.message_thread_id,
+            )
             self._safe_send_message(
                 incoming.chat_id,
                 f"已切换到会话 #{session.id}\n标题：{session.title}",
@@ -564,7 +580,11 @@ class TeledexApp:
             return
 
         if command == "/tbind":
-            active_session = self.storage.get_active_session(incoming.user_id)
+            active_session = self.storage.get_active_session(
+                incoming.user_id,
+                incoming.chat_id,
+                incoming.message_thread_id,
+            )
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
@@ -616,7 +636,11 @@ class TeledexApp:
             return
 
         if command == "/tpwd":
-            active_session = self.storage.get_active_session(incoming.user_id)
+            active_session = self.storage.get_active_session(
+                incoming.user_id,
+                incoming.chat_id,
+                incoming.message_thread_id,
+            )
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
@@ -633,7 +657,11 @@ class TeledexApp:
             return
 
         if command == "/tstop":
-            active_session = self.storage.get_active_session(incoming.user_id)
+            active_session = self.storage.get_active_session(
+                incoming.user_id,
+                incoming.chat_id,
+                incoming.message_thread_id,
+            )
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
@@ -662,7 +690,11 @@ class TeledexApp:
         )
 
     def _handle_prompt(self, incoming: IncomingMessage) -> None:
-        session = self.storage.get_active_session(incoming.user_id)
+        session = self.storage.get_active_session(
+            incoming.user_id,
+            incoming.chat_id,
+            incoming.message_thread_id,
+        )
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,

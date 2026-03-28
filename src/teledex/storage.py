@@ -81,6 +81,15 @@ class Storage:
                     error_message TEXT,
                     final_excerpt TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS session_contexts (
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    message_thread_id INTEGER NOT NULL DEFAULT 0,
+                    active_session_id INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, chat_id, message_thread_id)
+                );
                 """
             )
             self._conn.commit()
@@ -206,13 +215,37 @@ class Storage:
             row = self._conn.execute(query, params).fetchone()
         return self._row_to_session(row)
 
-    def get_active_session(self, user_id: int) -> SessionRecord | None:
+    def get_active_session(
+        self,
+        user_id: int,
+        chat_id: int | None = None,
+        message_thread_id: int | None = None,
+    ) -> SessionRecord | None:
+        if chat_id is not None:
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT active_session_id
+                    FROM session_contexts
+                    WHERE user_id = ? AND chat_id = ? AND message_thread_id = ?
+                    """,
+                    (user_id, chat_id, self._normalize_message_thread_id(message_thread_id)),
+                ).fetchone()
+            if row is not None and row["active_session_id"] is not None:
+                return self.get_session(int(row["active_session_id"]), user_id)
+
         user = self.get_user(user_id)
         if user is None or user.active_session_id is None:
             return None
         return self.get_session(user.active_session_id, user_id)
 
-    def set_active_session(self, user_id: int, session_id: int) -> None:
+    def set_active_session(
+        self,
+        user_id: int,
+        session_id: int,
+        chat_id: int | None = None,
+        message_thread_id: int | None = None,
+    ) -> None:
         now = _utc_now()
         with self._lock:
             self._conn.execute(
@@ -231,6 +264,24 @@ class Storage:
                 """,
                 (now, now, session_id, user_id),
             )
+            if chat_id is not None:
+                self._conn.execute(
+                    """
+                    INSERT INTO session_contexts (
+                        user_id, chat_id, message_thread_id, active_session_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, chat_id, message_thread_id) DO UPDATE SET
+                        active_session_id = excluded.active_session_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        user_id,
+                        chat_id,
+                        self._normalize_message_thread_id(message_thread_id),
+                        session_id,
+                        now,
+                    ),
+                )
             self._conn.commit()
 
     def bind_session_path(self, session_id: int, user_id: int, bound_path: str) -> None:
@@ -340,6 +391,9 @@ class Storage:
             ),
             updated_at=str(row["updated_at"]),
         )
+
+    def _normalize_message_thread_id(self, message_thread_id: int | None) -> int:
+        return int(message_thread_id) if message_thread_id is not None else 0
 
     def _row_to_session(self, row: sqlite3.Row | None) -> SessionRecord | None:
         if row is None:

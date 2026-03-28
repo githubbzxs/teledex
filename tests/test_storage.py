@@ -31,6 +31,22 @@ class StorageTestCase(unittest.TestCase):
         assert active is not None
         self.assertEqual(active.id, session_a.id)
 
+    def test_active_session_can_be_scoped_by_message_thread(self) -> None:
+        self.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session_a = self.storage.create_session(1, "会话 A")
+        session_b = self.storage.create_session(1, "会话 B")
+
+        self.storage.set_active_session(1, session_a.id, chat_id=100, message_thread_id=9)
+        self.storage.set_active_session(1, session_b.id, chat_id=100, message_thread_id=10)
+
+        active_a = self.storage.get_active_session(1, chat_id=100, message_thread_id=9)
+        active_b = self.storage.get_active_session(1, chat_id=100, message_thread_id=10)
+
+        assert active_a is not None
+        assert active_b is not None
+        self.assertEqual(active_a.id, session_a.id)
+        self.assertEqual(active_b.id, session_b.id)
+
     def test_bind_path_and_thread_id(self) -> None:
         self.storage.ensure_user(2, chat_id=101, message_thread_id=None)
         session = self.storage.create_session(2, "会话")
