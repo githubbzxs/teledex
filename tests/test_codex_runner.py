@@ -251,6 +251,11 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertIn("gpt-test", command)
         self.assertIn("--persist-extended-history", command)
 
+    def test_tmux_session_name_uses_directory_name_with_stable_suffix(self) -> None:
+        session_name = self.runner._tmux_session_name(2, Path("/root/teledex"))
+
+        self.assertTrue(session_name.startswith("teledex-teledex-"))
+
 
 if __name__ == "__main__":
     unittest.main()

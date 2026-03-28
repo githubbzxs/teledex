@@ -55,6 +55,12 @@ _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _session_title_from_path(path: Path) -> str:
+    normalized = path.expanduser()
+    name = normalized.name.strip()
+    return name or str(normalized)
+
+
 @dataclass(slots=True)
 class IncomingMessage:
     chat_id: int
@@ -580,18 +586,6 @@ class TeledexApp:
             return
 
         if command == "/tbind":
-            active_session = self.storage.get_active_session(
-                incoming.user_id,
-                incoming.chat_id,
-                incoming.message_thread_id,
-            )
-            if active_session is None:
-                self._safe_send_message(
-                    incoming.chat_id,
-                    "当前没有活跃会话，请先用 /tnew 或 /tuse。",
-                    incoming.message_thread_id,
-                )
-                return
             if not args:
                 self._safe_send_message(
                     incoming.chat_id,
@@ -614,24 +608,63 @@ class TeledexApp:
                     incoming.message_thread_id,
                 )
                 return
-            self.storage.bind_session_path(
-                active_session.id,
+            active_session = self.storage.get_active_session(
                 incoming.user_id,
-                str(bound_path),
+                incoming.chat_id,
+                incoming.message_thread_id,
+            )
+            normalized_path = str(bound_path)
+            target_session = self.storage.get_session_by_bound_path(
+                incoming.user_id,
+                normalized_path,
+            )
+            created_new_session = False
+            if target_session is None:
+                if active_session is None or (
+                    active_session.bound_path is not None
+                    and active_session.bound_path != normalized_path
+                ):
+                    target_session = self.storage.create_session(
+                        incoming.user_id,
+                        _session_title_from_path(bound_path),
+                    )
+                    created_new_session = True
+                else:
+                    target_session = active_session
+                self.storage.bind_session_path(
+                    target_session.id,
+                    incoming.user_id,
+                    normalized_path,
+                )
+            self.storage.set_active_session(
+                incoming.user_id,
+                target_session.id,
+                chat_id=incoming.chat_id,
+                message_thread_id=incoming.message_thread_id,
             )
             try:
-                self.runner.reset_terminal(active_session.id)
-                tmux_session_name = self.runner.ensure_terminal(active_session.id, bound_path)
+                self.runner.reset_terminal(target_session.id, bound_path)
+                tmux_session_name = self.runner.ensure_terminal(target_session.id, bound_path)
+                action_text = (
+                    f"已自动创建会话 #{target_session.id} 并绑定目录："
+                    if created_new_session
+                    else f"会话 #{target_session.id} 已绑定目录："
+                )
                 message = (
-                    f"会话 #{active_session.id} 已绑定目录：\n{bound_path}\n"
-                    f"当前名称：{bound_path}\n"
+                    f"{action_text}\n{bound_path}\n"
+                    f"当前名称：{_session_title_from_path(bound_path)}\n"
                     f"持久终端：tmux `{tmux_session_name}`"
                 )
             except Exception as exc:
                 self.logger.exception("初始化 tmux 会话失败")
+                action_text = (
+                    f"已自动创建会话 #{target_session.id} 并绑定目录："
+                    if created_new_session
+                    else f"会话 #{target_session.id} 已绑定目录："
+                )
                 message = (
-                    f"会话 #{active_session.id} 已绑定目录：\n{bound_path}\n"
-                    f"当前名称：{bound_path}\n"
+                    f"{action_text}\n{bound_path}\n"
+                    f"当前名称：{_session_title_from_path(bound_path)}\n"
                     f"但持久 tmux 终端初始化失败：{exc}"
                 )
             self._safe_send_message(incoming.chat_id, message, incoming.message_thread_id)

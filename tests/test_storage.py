@@ -57,9 +57,21 @@ class StorageTestCase(unittest.TestCase):
         fetched = self.storage.get_session(session.id, 2)
         self.assertIsNotNone(fetched)
         assert fetched is not None
-        self.assertEqual(fetched.title, "/root/demo-next")
+        self.assertEqual(fetched.title, "demo-next")
         self.assertEqual(fetched.bound_path, "/root/demo-next")
         self.assertIsNone(fetched.codex_thread_id)
+
+    def test_get_session_by_bound_path_returns_matching_session(self) -> None:
+        self.storage.ensure_user(2, chat_id=101, message_thread_id=None)
+        session = self.storage.create_session(2, "会话")
+        self.storage.bind_session_path(session.id, 2, "/root/demo")
+
+        fetched = self.storage.get_session_by_bound_path(2, "/root/demo")
+
+        self.assertIsNotNone(fetched)
+        assert fetched is not None
+        self.assertEqual(fetched.id, session.id)
+        self.assertEqual(fetched.title, "demo")
 
 
 if __name__ == "__main__":

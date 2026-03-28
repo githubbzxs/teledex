@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
+import re
 import shlex
 import subprocess
 import sys
@@ -69,7 +71,7 @@ class CodexRunner:
         self.logger = logging.getLogger("teledex.codex_runner")
 
     def ensure_terminal(self, session_id: int, cwd: Path) -> str:
-        tmux_session_name = self._tmux_session_name(session_id)
+        tmux_session_name = self._tmux_session_name(session_id, cwd)
         if self._tmux_session_exists(tmux_session_name):
             return tmux_session_name
         self._run_tmux(
@@ -86,11 +88,16 @@ class CodexRunner:
         )
         return tmux_session_name
 
-    def reset_terminal(self, session_id: int) -> None:
-        tmux_session_name = self._tmux_session_name(session_id)
-        if not self._tmux_session_exists(tmux_session_name):
-            return
-        self._run_tmux([self.config.tmux_bin, "kill-session", "-t", tmux_session_name])
+    def reset_terminal(self, session_id: int, cwd: Path | None = None) -> None:
+        session_names = [self._tmux_session_name(session_id)]
+        if cwd is not None:
+            current_name = self._tmux_session_name(session_id, cwd)
+            if current_name not in session_names:
+                session_names.insert(0, current_name)
+        for tmux_session_name in session_names:
+            if not self._tmux_session_exists(tmux_session_name):
+                continue
+            self._run_tmux([self.config.tmux_bin, "kill-session", "-t", tmux_session_name])
 
     def start(
         self,
@@ -339,8 +346,14 @@ class CodexRunner:
             command=" ".join(shlex.quote(part) for part in command),
         )
 
-    def _tmux_session_name(self, session_id: int) -> str:
-        return f"teledex-session-{session_id}"
+    def _tmux_session_name(self, session_id: int, cwd: Path | None = None) -> str:
+        if cwd is None:
+            return f"teledex-session-{session_id}"
+        resolved = cwd.expanduser().resolve()
+        leaf_name = resolved.name.strip() or "root"
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", leaf_name).strip("._-") or "root"
+        suffix = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:6]
+        return f"teledex-{slug}-{suffix}"
 
     def _tmux_session_exists(self, session_name: str) -> bool:
         result = subprocess.run(

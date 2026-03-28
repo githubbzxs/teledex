@@ -12,6 +12,14 @@ def _utc_now() -> str:
     return datetime.now(tz=UTC).isoformat(timespec="seconds")
 
 
+def _title_from_bound_path(bound_path: str) -> str:
+    normalized = str(Path(bound_path)).strip()
+    if not normalized:
+        return ""
+    name = Path(normalized).name.strip()
+    return name or normalized
+
+
 @dataclass(slots=True)
 class UserState:
     user_id: int
@@ -92,15 +100,17 @@ class Storage:
                 );
                 """
             )
-            self._conn.execute(
-                """
-                UPDATE sessions
-                SET title = bound_path
-                WHERE bound_path IS NOT NULL
-                  AND TRIM(bound_path) != ''
-                  AND title != bound_path
-                """
-            )
+            existing_rows = self._conn.execute(
+                "SELECT id, bound_path FROM sessions WHERE bound_path IS NOT NULL AND TRIM(bound_path) != ''"
+            ).fetchall()
+            for row in existing_rows:
+                title = _title_from_bound_path(str(row["bound_path"]))
+                if not title:
+                    continue
+                self._conn.execute(
+                    "UPDATE sessions SET title = ? WHERE id = ?",
+                    (title, int(row["id"])),
+                )
             self._conn.commit()
 
     def ensure_user(
@@ -209,6 +219,22 @@ class Storage:
             ).fetchall()
         return [self._row_to_session(row) for row in rows]
 
+    def get_session_by_bound_path(self, user_id: int, bound_path: str) -> SessionRecord | None:
+        normalized_path = str(Path(bound_path))
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, user_id, title, codex_thread_id, bound_path, status,
+                       created_at, updated_at, last_active_at
+                FROM sessions
+                WHERE user_id = ? AND bound_path = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (user_id, normalized_path),
+            ).fetchone()
+        return self._row_to_session(row)
+
     def get_session(self, session_id: int, user_id: int | None = None) -> SessionRecord | None:
         query = """
             SELECT id, user_id, title, codex_thread_id, bound_path, status,
@@ -295,6 +321,7 @@ class Storage:
 
     def bind_session_path(self, session_id: int, user_id: int, bound_path: str) -> None:
         now = _utc_now()
+        title = _title_from_bound_path(bound_path)
         with self._lock:
             self._conn.execute(
                 """
@@ -302,7 +329,7 @@ class Storage:
                 SET title = ?, bound_path = ?, codex_thread_id = NULL, updated_at = ?, last_active_at = ?
                 WHERE id = ? AND user_id = ?
                 """,
-                (bound_path, bound_path, now, now, session_id, user_id),
+                (title, bound_path, now, now, session_id, user_id),
             )
             self._conn.commit()
 
