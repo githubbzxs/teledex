@@ -34,6 +34,7 @@ class AppConfig:
     codex_exec_mode: str
     codex_model: str | None
     codex_enable_search: bool
+    codex_persist_extended_history: bool
     log_level: str
 
     @classmethod
@@ -64,6 +65,10 @@ class AppConfig:
 
         codex_model = os.environ.get("TELEDEX_CODEX_MODEL", "").strip() or None
         codex_enable_search = _parse_bool(os.environ.get("TELEDEX_CODEX_ENABLE_SEARCH"))
+        codex_persist_extended_history = _parse_bool(
+            os.environ.get("TELEDEX_CODEX_PERSIST_EXTENDED_HISTORY"),
+            True,
+        )
         log_level = os.environ.get("TELEDEX_LOG_LEVEL", "INFO").strip().upper() or "INFO"
 
         return cls(
@@ -76,5 +81,6 @@ class AppConfig:
             codex_exec_mode=codex_exec_mode,
             codex_model=codex_model,
             codex_enable_search=codex_enable_search,
+            codex_persist_extended_history=codex_persist_extended_history,
             log_level=log_level,
         )

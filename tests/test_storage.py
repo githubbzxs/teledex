@@ -36,12 +36,13 @@ class StorageTestCase(unittest.TestCase):
         session = self.storage.create_session(2, "会话")
         self.storage.bind_session_path(session.id, 2, "/root/demo")
         self.storage.update_session_thread_id(session.id, "thread-123")
+        self.storage.bind_session_path(session.id, 2, "/root/demo-next")
 
         fetched = self.storage.get_session(session.id, 2)
         self.assertIsNotNone(fetched)
         assert fetched is not None
-        self.assertEqual(fetched.bound_path, "/root/demo")
-        self.assertEqual(fetched.codex_thread_id, "thread-123")
+        self.assertEqual(fetched.bound_path, "/root/demo-next")
+        self.assertIsNone(fetched.codex_thread_id)
 
 
 if __name__ == "__main__":

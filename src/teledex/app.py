@@ -36,6 +36,7 @@ _PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 1.0
 _PREVIEW_TYPING_INTERVAL_SECONDS = 1.0
 _PREVIEW_STREAM_STEP_CHARS = 1
 _PREVIEW_HISTORY_MAX_CHARS = 2000
+_PREVIEW_TOOL_OUTPUT_MAX_CHARS = 600
 _PREVIEW_OUTPUT_MAX_CHARS = 400
 _PREVIEW_STREAM_INTERVAL_SECONDS = 0.04
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
@@ -69,6 +70,7 @@ class LivePreviewState:
         initial_status: str = "正在准备会话...",
         history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
         output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
+        tool_output_max_chars: int = _PREVIEW_TOOL_OUTPUT_MAX_CHARS,
         stream_step_chars: int = _PREVIEW_STREAM_STEP_CHARS,
         now_func: Callable[[], float] | None = None,
     ) -> None:
@@ -77,9 +79,11 @@ class LivePreviewState:
         self._visible_chars = 0
         self._commentary_order: list[str] = []
         self._commentary_text_by_id: dict[str, str] = {}
+        self._tool_output_text = ""
         self._frame_index = 0
         self._history_max_chars = max(1, history_max_chars)
         self._output_max_chars = max(1, output_max_chars)
+        self._tool_output_max_chars = max(1, tool_output_max_chars)
         self._stream_step_chars = max(1, stream_step_chars)
         self._in_progress = True
         self._now_func = now_func or time.monotonic
@@ -116,6 +120,14 @@ class LivePreviewState:
             if normalized_id not in self._commentary_text_by_id:
                 self._commentary_order.append(normalized_id)
             self._commentary_text_by_id[normalized_id] = normalized
+            self._in_progress = True
+
+    def update_tool_output(self, text: str) -> None:
+        normalized = text.replace("\r\n", "\n").strip()
+        if not normalized:
+            return
+        with self._lock:
+            self._tool_output_text = normalized
             self._in_progress = True
 
     def advance(self) -> str:
@@ -166,6 +178,13 @@ class LivePreviewState:
         if commentary:
             sections.append(f"思考过程：\n{commentary}")
 
+        tool_output = _truncate_preview_tail(
+            self._tool_output_text,
+            self._tool_output_max_chars,
+        )
+        if tool_output:
+            sections.append(f"工具输出：\n{tool_output}")
+
         output_text = _truncate_preview_text(
             self._target_text[: self._visible_chars],
             self._output_max_chars,
@@ -203,6 +222,14 @@ def _truncate_preview_middle(text: str, max_chars: int) -> str:
     head = text[:head_chars].rstrip()
     tail = text[-tail_chars:].lstrip()
     return f"{head}{separator}{tail}"
+
+
+def _truncate_preview_tail(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 4:
+        return text[-max_chars:]
+    return "...\n" + text[-(max_chars - 4) :].lstrip()
 
 
 def _format_elapsed_seconds(seconds: float) -> str:
@@ -578,6 +605,8 @@ class TeledexApp:
                         parsed.commentary_id,
                         parsed.commentary_text,
                     )
+                if parsed.tool_output_text:
+                    preview_state.update_tool_output(parsed.tool_output_text)
                 if parsed.preview_text:
                     preview_state.update_stream_text(parsed.preview_text)
                 if parsed.status_text:

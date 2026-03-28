@@ -28,6 +28,7 @@ class ParsedCodexEvent:
     preview_text: str | None = None
     commentary_id: str | None = None
     commentary_text: str | None = None
+    tool_output_text: str | None = None
     thread_id: str | None = None
     final_message: str | None = None
 
@@ -92,12 +93,46 @@ class CodexRunner:
             return ParsedCodexEvent(status_text="正在思考...")
         if event_type == "turn.completed":
             return ParsedCodexEvent(status_text="正在整理回复...")
+        if event_type == "turn.interrupted":
+            message = str(payload.get("message") or "任务已中断").strip()
+            return ParsedCodexEvent(status_text=message or "任务已中断")
         if event_type == "turn.failed":
             message = str(payload.get("message") or "执行失败").strip()
             return ParsedCodexEvent(status_text=message or "执行失败")
         if event_type == "error":
             message = str(payload.get("message") or "执行失败").strip()
             return ParsedCodexEvent(status_text=message or "执行失败")
+        if event_type == "status.updated":
+            message = str(payload.get("message") or "").strip()
+            return ParsedCodexEvent(status_text=message or None)
+        if event_type == "plan.updated":
+            plan_id = str(payload.get("plan_id") or "").strip()
+            text = str(payload.get("text") or "").strip()
+            if not plan_id or not text:
+                return ParsedCodexEvent()
+            return ParsedCodexEvent(
+                status_text="已更新计划",
+                commentary_id=plan_id,
+                commentary_text=text,
+            )
+        if event_type == "reasoning.updated":
+            item_id = str(payload.get("item_id") or "").strip()
+            text = str(payload.get("text") or "").strip()
+            if not item_id or not text:
+                return ParsedCodexEvent()
+            return ParsedCodexEvent(
+                status_text="正在思考...",
+                commentary_id=f"reasoning:{item_id}",
+                commentary_text=text,
+            )
+        if event_type == "command.output":
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                return ParsedCodexEvent(status_text="正在调用工具...")
+            return ParsedCodexEvent(
+                status_text="正在调用工具...",
+                tool_output_text=text,
+            )
         if event_type.startswith("exec.command.") or event_type.startswith("patch."):
             return ParsedCodexEvent(status_text="正在调用工具...")
 
@@ -117,10 +152,48 @@ class CodexRunner:
                 return ParsedCodexEvent(
                     status_text="正在整理回复..." if phase == "final_answer" or text else None,
                     preview_text=text or None,
-                    final_message=text or None,
+                    final_message=(text or None) if event_type == "item.completed" else None,
                 )
+            if item_type == "plan":
+                text = str(item.get("text", "")).strip()
+                item_id = str(item.get("id", "")).strip() or "plan"
+                if text:
+                    return ParsedCodexEvent(
+                        status_text="已更新计划",
+                        commentary_id=f"plan:{item_id}",
+                        commentary_text=text,
+                    )
+                return ParsedCodexEvent(status_text="已更新计划")
+            if item_type == "reasoning":
+                summary = item.get("summary")
+                if isinstance(summary, list):
+                    parts = []
+                    for section in summary:
+                        if isinstance(section, dict):
+                            text = str(section.get("text") or "").strip()
+                            if text:
+                                parts.append(text)
+                    summary_text = "\n\n".join(parts).strip()
+                    if summary_text:
+                        item_id = str(item.get("id", "")).strip() or "reasoning"
+                        return ParsedCodexEvent(
+                            status_text="正在思考...",
+                            commentary_id=f"reasoning:{item_id}",
+                            commentary_text=summary_text,
+                        )
             if item_type == "command_execution":
                 command = str(item.get("command", "")).strip()
+                aggregated_output = str(item.get("aggregatedOutput") or "").strip()
+                status = str(item.get("status") or "").strip()
+                if aggregated_output:
+                    return ParsedCodexEvent(
+                        status_text=(
+                            "正在执行命令..."
+                            if status in {"", "inProgress"}
+                            else "工具执行完成"
+                        ),
+                        tool_output_text=aggregated_output,
+                    )
                 if command:
                     return ParsedCodexEvent(
                         status_text=f"正在执行：{summarize_command(command)}"
@@ -187,4 +260,6 @@ class CodexRunner:
 
         if self.config.codex_enable_search:
             command.append("--search")
+        if self.config.codex_persist_extended_history:
+            command.append("--persist-extended-history")
         return command

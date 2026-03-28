@@ -22,6 +22,7 @@ class CodexRunnerTestCase(unittest.TestCase):
             codex_exec_mode="full-auto",
             codex_model="gpt-test",
             codex_enable_search=False,
+            codex_persist_extended_history=True,
             log_level="INFO",
         )
         self.runner = CodexRunner(self.config)
@@ -45,7 +46,7 @@ class CodexRunnerTestCase(unittest.TestCase):
         )
 
         self.assertEqual(parsed.preview_text, "正在流式输出")
-        self.assertEqual(parsed.final_message, "正在流式输出")
+        self.assertIsNone(parsed.final_message)
 
     def test_parse_event_line_supports_commentary_agent_message(self) -> None:
         parsed = self.runner.parse_event_line(
@@ -81,6 +82,56 @@ class CodexRunnerTestCase(unittest.TestCase):
 
         self.assertEqual(parsed.status_text, "执行失败")
 
+    def test_parse_event_line_supports_reasoning_summary_updates(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "reasoning.updated",
+                    "item_id": "reasoning_1",
+                    "text": "先检查目录，再确认配置。",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.status_text, "正在思考...")
+        self.assertEqual(parsed.commentary_id, "reasoning:reasoning_1")
+        self.assertEqual(parsed.commentary_text, "先检查目录，再确认配置。")
+
+    def test_parse_event_line_supports_command_output(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "command.output",
+                    "item_id": "cmd_1",
+                    "text": "line1\nline2",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.status_text, "正在调用工具...")
+        self.assertEqual(parsed.tool_output_text, "line1\nline2")
+
+    def test_parse_event_line_only_marks_final_message_on_completed_agent_message(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "id": "msg_2",
+                        "phase": "final_answer",
+                        "text": "最终回复",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.preview_text, "最终回复")
+        self.assertEqual(parsed.final_message, "最终回复")
+
     def test_build_command_uses_app_server_helper(self) -> None:
         output_file = Path(self.temp_dir.name) / "last.txt"
         command = self.runner._build_command(
@@ -97,6 +148,7 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertIn("thread-123", command)
         self.assertIn("--model", command)
         self.assertIn("gpt-test", command)
+        self.assertIn("--persist-extended-history", command)
 
 
 if __name__ == "__main__":

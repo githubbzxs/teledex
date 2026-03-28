@@ -33,6 +33,7 @@ class AppMessagingTestCase(unittest.TestCase):
             codex_exec_mode="default",
             codex_model=None,
             codex_enable_search=False,
+            codex_persist_extended_history=True,
             log_level="INFO",
         )
         self.app = TeledexApp(self.config)
@@ -189,6 +190,15 @@ class LivePreviewStateTestCase(unittest.TestCase):
         self.assertEqual(
             preview.render(),
             "思考时间：00:05\n\n思考过程：\n先看目录\n\n再检查配置\n\nstatusline：○ 正在执行：pwd",
+        )
+
+    def test_tool_output_is_rendered_in_preview(self) -> None:
+        preview = LivePreviewState()
+        preview.update_tool_output("first line\nsecond line")
+
+        self.assertEqual(
+            preview.render(),
+            "思考时间：00:00\n\n工具输出：\nfirst line\nsecond line\n\nstatusline：○ 正在准备会话...",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:

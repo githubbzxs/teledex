@@ -239,7 +239,7 @@ class Storage:
             self._conn.execute(
                 """
                 UPDATE sessions
-                SET bound_path = ?, updated_at = ?, last_active_at = ?
+                SET bound_path = ?, codex_thread_id = NULL, updated_at = ?, last_active_at = ?
                 WHERE id = ? AND user_id = ?
                 """,
                 (bound_path, now, now, session_id, user_id),

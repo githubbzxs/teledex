@@ -43,6 +43,7 @@
 - 多会话创建、列表查看与切换
 - 每个会话可绑定独立工作目录
 - 基于 `codex exec` / `codex exec resume` 的持续会话
+- 基于 app-server 结构化通知的实时预览桥接
 - 单条消息实时刷新 `draft` 过程预览
 - `/stop` 中断当前执行任务
 - SQLite 本地持久化用户、会话与运行状态
@@ -133,6 +134,7 @@ PYTHONPATH=src python3 -m teledex
 - `TELEDEX_CODEX_EXEC_MODE`：Codex 执行模式，支持 `default`、`full-auto`、`dangerous`
 - `TELEDEX_CODEX_MODEL`：可选的 Codex 模型覆盖
 - `TELEDEX_CODEX_ENABLE_SEARCH`：是否启用搜索能力
+- `TELEDEX_CODEX_PERSIST_EXTENDED_HISTORY`：是否持久化更完整的线程历史，默认 `true`
 - `TELEDEX_LOG_LEVEL`：日志级别，默认 `INFO`
 
 ## Telegram 命令
@@ -152,7 +154,9 @@ PYTHONPATH=src python3 -m teledex
 - 每个授权用户都维护自己的活跃会话指针
 - 每个会话都可以绑定一个真实项目目录
 - 首次执行会创建 Codex 线程，后续消息会尽量复用已有线程
+- 默认开启 `persistExtendedHistory`，让后续 resume 更完整保留上下文
 - 执行过程中会持续刷新同一条 Telegram 预览消息
+- 预览会分开展示思考摘要、工具输出与最终回复流
 - 完成后会回传正式输出，并写入运行状态
 
 ## systemd 部署

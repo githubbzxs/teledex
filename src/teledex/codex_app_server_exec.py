@@ -11,7 +11,11 @@ from typing import Any
 
 
 APP_SERVER_CLIENT_NAME = "teledex"
-APP_SERVER_CLIENT_VERSION = "0.1.0"
+APP_SERVER_CLIENT_VERSION = "0.2.0"
+_STREAM_TEXT_MAX_CHARS = 200_000
+_REASONING_TEXT_MAX_CHARS = 12_000
+_COMMAND_OUTPUT_MAX_CHARS = 4_000
+_PLAN_TEXT_MAX_CHARS = 8_000
 
 
 class AppServerClient:
@@ -53,7 +57,7 @@ class AppServerClient:
                 "version": APP_SERVER_CLIENT_VERSION,
             },
             "capabilities": {
-                "experimental_api": True,
+                "experimentalApi": True,
             },
         }
         self.request_simple("initialize", params)
@@ -196,6 +200,7 @@ def _normalize_item(item: Any) -> Any:
         "fileChange": "file_change",
         "mcpToolCall": "mcp_tool_call",
         "dynamicToolCall": "dynamic_tool_call",
+        "collabToolCall": "collab_tool_call",
         "collabAgentToolCall": "collab_agent_tool_call",
         "webSearch": "web_search",
         "imageView": "image_view",
@@ -207,6 +212,136 @@ def _normalize_item(item: Any) -> Any:
     normalized = dict(item)
     normalized["type"] = normalized_type
     return normalized
+
+
+def _append_capped(base: str, delta: str, max_chars: int) -> str:
+    if not delta:
+        return base
+    merged = f"{base}{delta}"
+    if len(merged) <= max_chars:
+        return merged
+    return merged[-max_chars:]
+
+
+def _summarize_plan(explanation: Any, plan: Any) -> str:
+    lines: list[str] = []
+    explanation_text = str(explanation or "").strip()
+    if explanation_text:
+        lines.append(explanation_text)
+
+    if isinstance(plan, list):
+        status_labels = {
+            "pending": "待办",
+            "inProgress": "进行中",
+            "in_progress": "进行中",
+            "completed": "已完成",
+        }
+        for index, raw_step in enumerate(plan, start=1):
+            if not isinstance(raw_step, dict):
+                continue
+            step = str(raw_step.get("step") or "").strip()
+            if not step:
+                continue
+            status = str(raw_step.get("status") or "").strip()
+            status_text = status_labels.get(status, status or "未知")
+            lines.append(f"{index}. [{status_text}] {step}")
+
+    text = "\n".join(lines).strip()
+    if len(text) <= _PLAN_TEXT_MAX_CHARS:
+        return text
+    return text[: _PLAN_TEXT_MAX_CHARS - 3].rstrip() + "..."
+
+
+def _extract_error_message(params: dict[str, Any]) -> str:
+    error = params.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or "").strip()
+        if message:
+            return message
+        return json.dumps(error, ensure_ascii=False)
+    return str(params.get("message") or "未知 app-server 错误").strip() or "未知 app-server 错误"
+
+
+def _update_agent_message(
+    latest_agent_message_by_id: dict[str, dict[str, Any]],
+    item_id: str,
+    delta: str,
+) -> dict[str, Any]:
+    latest_item = dict(latest_agent_message_by_id.get(item_id, {}))
+    latest_text = str(latest_item.get("text") or "")
+    latest_text = _append_capped(latest_text, delta, _STREAM_TEXT_MAX_CHARS)
+    latest_item.update(
+        {
+            "type": "agent_message",
+            "id": item_id,
+            "text": latest_text,
+        }
+    )
+    latest_agent_message_by_id[item_id] = latest_item
+    return latest_item
+
+
+def _update_plan_item(
+    latest_plan_text_by_id: dict[str, str],
+    item_id: str,
+    delta: str,
+) -> dict[str, Any]:
+    latest_plan_text = latest_plan_text_by_id.get(item_id, "")
+    latest_plan_text = _append_capped(latest_plan_text, delta, _PLAN_TEXT_MAX_CHARS)
+    latest_plan_text_by_id[item_id] = latest_plan_text
+    return {
+        "type": "plan",
+        "id": item_id,
+        "text": latest_plan_text,
+    }
+
+
+def _render_reasoning_summary(
+    reasoning_summary_by_id: dict[str, dict[int, str]],
+    item_id: str,
+) -> str:
+    parts = reasoning_summary_by_id.get(item_id, {})
+    if not parts:
+        return ""
+    text = "\n\n".join(parts[index] for index in sorted(parts) if parts[index]).strip()
+    if len(text) <= _REASONING_TEXT_MAX_CHARS:
+        return text
+    return text[: _REASONING_TEXT_MAX_CHARS - 3].rstrip() + "..."
+
+
+def _update_reasoning_summary(
+    reasoning_summary_by_id: dict[str, dict[int, str]],
+    item_id: str,
+    summary_index: int,
+    delta: str,
+) -> str:
+    summaries = reasoning_summary_by_id.setdefault(item_id, {})
+    current = summaries.get(summary_index, "")
+    summaries[summary_index] = _append_capped(
+        current,
+        delta,
+        _REASONING_TEXT_MAX_CHARS,
+    )
+    return _render_reasoning_summary(reasoning_summary_by_id, item_id)
+
+
+def _ensure_reasoning_summary_index(
+    reasoning_summary_by_id: dict[str, dict[int, str]],
+    item_id: str,
+    summary_index: int,
+) -> None:
+    reasoning_summary_by_id.setdefault(item_id, {}).setdefault(summary_index, "")
+
+
+def _update_command_output(
+    command_output_by_id: dict[str, str],
+    item_id: str,
+    delta: str,
+) -> str:
+    current = command_output_by_id.get(item_id, "")
+    updated = _append_capped(current, delta, _COMMAND_OUTPUT_MAX_CHARS)
+    command_output_by_id[item_id] = updated
+    return updated
 
 
 def _execution_overrides(exec_mode: str) -> dict[str, str]:
@@ -228,6 +363,8 @@ def _build_thread_start_params(args: argparse.Namespace) -> dict[str, Any]:
         "cwd": str(Path(args.cwd)),
         "ephemeral": False,
     }
+    if args.persist_extended_history:
+        params["persistExtendedHistory"] = True
     params.update(_execution_overrides(args.exec_mode))
     if args.model:
         params["model"] = args.model
@@ -240,6 +377,8 @@ def _build_thread_resume_params(args: argparse.Namespace) -> dict[str, Any]:
     params: dict[str, Any] = {
         "threadId": args.thread_id,
     }
+    if args.persist_extended_history:
+        params["persistExtendedHistory"] = True
     params.update(_execution_overrides(args.exec_mode))
     if args.model:
         params["model"] = args.model
@@ -276,7 +415,23 @@ def _map_notification(
     method: str,
     params: dict[str, Any],
     latest_agent_message_by_id: dict[str, dict[str, Any]],
+    latest_plan_text_by_id: dict[str, str],
+    reasoning_summary_by_id: dict[str, dict[int, str]],
+    command_output_by_id: dict[str, str],
 ) -> dict[str, Any] | None:
+    if method == "thread/started":
+        thread = params.get("thread")
+        if not isinstance(thread, dict):
+            return None
+        thread_id = str(thread.get("id") or "").strip()
+        if not thread_id:
+            return None
+        return {
+            "type": "thread.started",
+            "thread_id": thread_id,
+            "cwd": thread.get("cwd"),
+            "status": thread.get("status"),
+        }
     if method == "turn/started":
         return {"type": "turn.started"}
     if method == "turn/completed":
@@ -289,14 +444,41 @@ def _map_notification(
                 if error is not None
                 else "执行失败",
             }
+        if isinstance(turn, dict) and turn.get("status") == "interrupted":
+            return {
+                "type": "turn.interrupted",
+                "message": "任务已中断",
+            }
         return {
             "type": "turn.completed",
             "usage": turn.get("usage") if isinstance(turn, dict) else None,
         }
+    if method == "turn/plan/updated":
+        return {
+            "type": "plan.updated",
+            "plan_id": f"turn-plan:{str(params.get('turnId') or 'current')}",
+            "text": _summarize_plan(
+                params.get("explanation"),
+                params.get("plan"),
+            ),
+        }
+    if method == "model/rerouted":
+        from_model = str(params.get("fromModel") or "").strip()
+        to_model = str(params.get("toModel") or "").strip()
+        reason = str(params.get("reason") or "").strip()
+        message = "模型路由已调整"
+        if from_model and to_model:
+            message = f"模型已切换：{from_model} -> {to_model}"
+        if reason:
+            message = f"{message}（{reason}）"
+        return {
+            "type": "status.updated",
+            "message": message,
+        }
     if method == "error":
         return {
             "type": "error",
-            "message": str(params.get("message") or "未知 app-server 错误"),
+            "message": _extract_error_message(params),
         }
     if method == "item/started":
         item = _normalize_item(params.get("item"))
@@ -306,6 +488,15 @@ def _map_notification(
             and isinstance(item.get("id"), str)
         ):
             latest_agent_message_by_id[item["id"]] = dict(item)
+        if isinstance(item, dict) and item.get("type") == "plan" and isinstance(item.get("id"), str):
+            latest_plan_text_by_id[item["id"]] = str(item.get("text") or "")
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "command_execution"
+            and isinstance(item.get("id"), str)
+            and isinstance(item.get("aggregatedOutput"), str)
+        ):
+            command_output_by_id[item["id"]] = item["aggregatedOutput"]
         return {
             "type": "item.started",
             "item": item,
@@ -318,6 +509,15 @@ def _map_notification(
             and isinstance(item.get("id"), str)
         ):
             latest_agent_message_by_id[item["id"]] = dict(item)
+        if isinstance(item, dict) and item.get("type") == "plan" and isinstance(item.get("id"), str):
+            latest_plan_text_by_id[item["id"]] = str(item.get("text") or "")
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "command_execution"
+            and isinstance(item.get("id"), str)
+            and isinstance(item.get("aggregatedOutput"), str)
+        ):
+            command_output_by_id[item["id"]] = item["aggregatedOutput"]
         return {
             "type": "item.completed",
             "item": item,
@@ -327,20 +527,84 @@ def _map_notification(
         delta = params.get("delta")
         if not isinstance(item_id, str) or not isinstance(delta, str):
             raise RuntimeError("item/agentMessage/delta 缺少必要字段")
-        latest_item = dict(latest_agent_message_by_id.get(item_id, {}))
-        latest_text = str(latest_item.get("text") or "")
-        latest_text += delta
-        latest_item.update(
-            {
-                "type": "agent_message",
-                "id": item_id,
-                "text": latest_text,
-            }
-        )
-        latest_agent_message_by_id[item_id] = latest_item
+        latest_item = _update_agent_message(latest_agent_message_by_id, item_id, delta)
         return {
             "type": "item.updated",
             "item": latest_item,
+        }
+    if method == "agent/messageDelta":
+        delta = params.get("delta")
+        role = str(params.get("role") or "assistant").strip()
+        if role != "assistant" or not isinstance(delta, str):
+            return None
+        latest_item = _update_agent_message(
+            latest_agent_message_by_id,
+            "agent_message_fallback",
+            delta,
+        )
+        return {
+            "type": "item.updated",
+            "item": latest_item,
+        }
+    if method == "item/plan/delta":
+        item_id = params.get("itemId")
+        delta = params.get("delta")
+        if not isinstance(item_id, str) or not isinstance(delta, str):
+            raise RuntimeError("item/plan/delta 缺少必要字段")
+        return {
+            "type": "item.updated",
+            "item": _update_plan_item(latest_plan_text_by_id, item_id, delta),
+        }
+    if method == "item/reasoning/summaryPartAdded":
+        item_id = params.get("itemId")
+        summary_index = params.get("summaryIndex")
+        if not isinstance(item_id, str) or not isinstance(summary_index, int):
+            raise RuntimeError("item/reasoning/summaryPartAdded 缺少必要字段")
+        _ensure_reasoning_summary_index(reasoning_summary_by_id, item_id, summary_index)
+        return None
+    if method == "item/reasoning/summaryTextDelta":
+        item_id = params.get("itemId")
+        summary_index = params.get("summaryIndex")
+        delta = params.get("delta")
+        if (
+            not isinstance(item_id, str)
+            or not isinstance(summary_index, int)
+            or not isinstance(delta, str)
+        ):
+            raise RuntimeError("item/reasoning/summaryTextDelta 缺少必要字段")
+        return {
+            "type": "reasoning.updated",
+            "item_id": item_id,
+            "text": _update_reasoning_summary(
+                reasoning_summary_by_id,
+                item_id,
+                summary_index,
+                delta,
+            ),
+        }
+    if method == "reasoning/summaryTextDelta":
+        delta = params.get("delta")
+        if not isinstance(delta, str):
+            return None
+        return {
+            "type": "reasoning.updated",
+            "item_id": "reasoning_summary_fallback",
+            "text": _update_reasoning_summary(
+                reasoning_summary_by_id,
+                "reasoning_summary_fallback",
+                0,
+                delta,
+            ),
+        }
+    if method == "item/commandExecution/outputDelta":
+        item_id = params.get("itemId")
+        delta = params.get("delta")
+        if not isinstance(item_id, str) or not isinstance(delta, str):
+            raise RuntimeError("item/commandExecution/outputDelta 缺少必要字段")
+        return {
+            "type": "command.output",
+            "item_id": item_id,
+            "text": _update_command_output(command_output_by_id, item_id, delta),
         }
     return None
 
@@ -349,6 +613,10 @@ def run(args: argparse.Namespace) -> int:
     client: AppServerClient | None = None
     final_response = ""
     latest_agent_message_by_id: dict[str, dict[str, Any]] = {}
+    latest_plan_text_by_id: dict[str, str] = {}
+    reasoning_summary_by_id: dict[str, dict[int, str]] = {}
+    command_output_by_id: dict[str, str] = {}
+    fallback_agent_response = ""
     try:
         cwd = Path(args.cwd).resolve()
         client = AppServerClient.start(args.codex_bin, cwd)
@@ -399,6 +667,9 @@ def run(args: argparse.Namespace) -> int:
                 message["method"],
                 message.get("params") or {},
                 latest_agent_message_by_id,
+                latest_plan_text_by_id,
+                reasoning_summary_by_id,
+                command_output_by_id,
             )
             if event is None:
                 continue
@@ -409,14 +680,21 @@ def run(args: argparse.Namespace) -> int:
                 isinstance(item, dict)
                 and item.get("type") == "agent_message"
                 and isinstance(item.get("text"), str)
-                and str(item.get("phase") or "") == "final_answer"
             ):
-                final_response = item["text"]
+                phase = str(item.get("phase") or "").strip()
+                if event["type"] == "item.completed":
+                    if phase == "final_answer":
+                        final_response = item["text"]
+                    elif phase != "commentary":
+                        fallback_agent_response = item["text"]
 
-            if event["type"] in {"turn.completed", "turn.failed"}:
+            if event["type"] in {"turn.completed", "turn.failed", "turn.interrupted"}:
                 turn_completed = True
 
-        Path(args.output_file).write_text(final_response, encoding="utf-8")
+        Path(args.output_file).write_text(
+            final_response or fallback_agent_response,
+            encoding="utf-8",
+        )
         return 0
     except Exception as exc:
         _emit_event({"type": "error", "message": str(exc)})
@@ -436,6 +714,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thread-id")
     parser.add_argument("--model")
     parser.add_argument("--search", action="store_true")
+    parser.add_argument("--persist-extended-history", action="store_true")
     return parser.parse_args()
 
 
