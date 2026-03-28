@@ -1053,19 +1053,31 @@ class TeledexApp:
         text: str,
         preview_state: LivePreviewState | None = None,
     ) -> None:
+        preview_updated = False
         if preview_state is not None:
             preview_state.update_stream_text(text)
             preview_state.complete()
             if self._render_finished_preview(active_run, preview_state):
+                preview_updated = True
+        if not preview_updated:
+            inline_text, parse_mode = self._build_inline_result(text)
+            if self._edit_preview_message(active_run, inline_text, parse_mode=parse_mode):
+                preview_updated = True
+            else:
+                self._safe_send_message(
+                    active_run.chat_id,
+                    inline_text,
+                    active_run.message_thread_id,
+                    parse_mode=parse_mode,
+                )
                 return
-        inline_text, parse_mode = self._build_inline_result(text)
-        if self._edit_preview_message(active_run, inline_text, parse_mode=parse_mode):
-            return
+        self._send_completion_notice(active_run)
+
+    def _send_completion_notice(self, active_run: ActiveRun) -> None:
         self._safe_send_message(
             active_run.chat_id,
-            inline_text,
+            "已完成",
             active_run.message_thread_id,
-            parse_mode=parse_mode,
         )
 
     def _build_inline_result(self, text: str) -> tuple[str, str | None]:

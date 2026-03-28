@@ -124,6 +124,7 @@ class AppMessagingTestCase(unittest.TestCase):
             return True
 
         self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
+        self.app._safe_send_message = lambda *args, **kwargs: None  # type: ignore[method-assign]
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(len(calls), 1)
@@ -160,6 +161,7 @@ class AppMessagingTestCase(unittest.TestCase):
             return True
 
         self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
+        self.app._safe_send_message = lambda *args, **kwargs: None  # type: ignore[method-assign]
         self.app._send_run_result(active_run, "最终回复", preview)
 
         self.assertEqual(len(calls), 1)
@@ -167,6 +169,122 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertIn("gpt-5.4 default · 98% left · ~/teledex", str(calls[0]["text"]))
         self.assertEqual(calls[0]["parse_mode"], "HTML")
+
+    def test_send_run_result_sends_completion_notice_after_preview_edit(self) -> None:
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        edit_calls: list[dict[str, object]] = []
+        notice_calls: list[dict[str, object]] = []
+
+        def fake_edit_preview_message(
+            active_run: ActiveRun,
+            text: str,
+            parse_mode: str | None = None,
+        ) -> bool:
+            edit_calls.append(
+                {
+                    "text": text,
+                    "parse_mode": parse_mode,
+                }
+            )
+            return True
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            notice_calls.append(
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "message_thread_id": message_thread_id,
+                    "reply_to_message_id": reply_to_message_id,
+                    "parse_mode": parse_mode,
+                }
+            )
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=789,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._send_run_result(active_run, "最终回复")
+
+        self.assertEqual(len(edit_calls), 1)
+        self.assertEqual(
+            notice_calls,
+            [
+                {
+                    "chat_id": 100,
+                    "text": "已完成",
+                    "message_thread_id": 9,
+                    "reply_to_message_id": None,
+                    "parse_mode": None,
+                }
+            ],
+        )
+
+    def test_send_run_result_does_not_duplicate_notice_when_falling_back_to_new_message(self) -> None:
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        calls: list[dict[str, object]] = []
+
+        def fake_edit_preview_message(
+            active_run: ActiveRun,
+            text: str,
+            parse_mode: str | None = None,
+        ) -> bool:
+            return False
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            calls.append(
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "message_thread_id": message_thread_id,
+                    "reply_to_message_id": reply_to_message_id,
+                    "parse_mode": parse_mode,
+                }
+            )
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=790,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._send_run_result(active_run, "最终回复")
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("最终回复", str(calls[0]["text"]))
 
     def test_handle_prompt_allows_other_session_to_run_in_parallel(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
