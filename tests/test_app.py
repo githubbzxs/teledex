@@ -161,21 +161,17 @@ class LivePreviewStateTestCase(unittest.TestCase):
         self.assertEqual(preview.advance(), "思考时间：00:00\n\nstatusline：● 正在思考...")
         self.assertEqual(preview.advance(), "思考时间：00:00\n\nstatusline：○ 正在思考...")
 
-    def test_stream_text_reveals_incrementally(self) -> None:
+    def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState(stream_step_chars=2)
         preview.update_stream_text("abcdef")
 
         self.assertEqual(
             preview.render(),
-            "思考时间：00:00\n\n输出预览：\nab\n\nstatusline：○ 正在输出...",
-        )
-        self.assertEqual(
-            preview.advance(),
-            "思考时间：00:00\n\n输出预览：\nabcd\n\nstatusline：● 正在输出...",
-        )
-        self.assertEqual(
-            preview.advance(),
             "思考时间：00:00\n\n输出预览：\nabcdef\n\nstatusline：○ 正在输出...",
+        )
+        self.assertEqual(
+            preview.advance(),
+            "思考时间：00:00\n\n输出预览：\nabcdef\n\nstatusline：● 正在输出...",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:

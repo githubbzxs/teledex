@@ -86,6 +86,7 @@ class LivePreviewState:
         self._tool_output_max_chars = max(1, tool_output_max_chars)
         self._stream_step_chars = max(1, stream_step_chars)
         self._in_progress = True
+        self._flush_requested = False
         self._now_func = now_func or time.monotonic
         self._started_at = self._now_func()
         self._lock = threading.RLock()
@@ -95,21 +96,23 @@ class LivePreviewState:
         if not normalized:
             return
         with self._lock:
+            if normalized == self._status_text:
+                return
             self._status_text = normalized
+            self._flush_requested = True
 
     def update_stream_text(self, text: str) -> None:
         normalized = strip_citations(text).strip()
         if not normalized:
             return
         with self._lock:
-            if normalized != self._target_text:
-                if not normalized.startswith(self._target_text):
-                    self._visible_chars = min(self._visible_chars, len(normalized))
-                self._target_text = normalized
-            if self._visible_chars == 0:
-                self._visible_chars = min(self._stream_step_chars, len(self._target_text))
+            if normalized == self._target_text and self._visible_chars == len(self._target_text):
+                return
+            self._target_text = normalized
+            self._visible_chars = len(self._target_text)
             self._status_text = "正在输出..."
             self._in_progress = True
+            self._flush_requested = True
 
     def update_commentary(self, item_id: str, text: str) -> None:
         normalized = strip_citations(text).strip()
@@ -117,18 +120,25 @@ class LivePreviewState:
         if not normalized or not normalized_id:
             return
         with self._lock:
+            previous = self._commentary_text_by_id.get(normalized_id)
             if normalized_id not in self._commentary_text_by_id:
                 self._commentary_order.append(normalized_id)
+            if previous == normalized:
+                return
             self._commentary_text_by_id[normalized_id] = normalized
             self._in_progress = True
+            self._flush_requested = True
 
     def update_tool_output(self, text: str) -> None:
         normalized = text.replace("\r\n", "\n").strip()
         if not normalized:
             return
         with self._lock:
+            if normalized == self._tool_output_text:
+                return
             self._tool_output_text = normalized
             self._in_progress = True
+            self._flush_requested = True
 
     def advance(self) -> str:
         with self._lock:
@@ -146,7 +156,11 @@ class LivePreviewState:
 
     def has_pending_stream(self) -> bool:
         with self._lock:
-            return bool(self._target_text) and self._visible_chars < len(self._target_text)
+            return self._flush_requested
+
+    def mark_rendered(self) -> None:
+        with self._lock:
+            self._flush_requested = False
 
     def target_text(self) -> str:
         with self._lock:
@@ -157,6 +171,7 @@ class LivePreviewState:
             self._visible_chars = len(self._target_text)
             self._status_text = "已完成"
             self._in_progress = False
+            self._flush_requested = False
             return self._render_locked()
 
     def _render_locked(self) -> str:
@@ -721,6 +736,7 @@ class TeledexApp:
             if text and text != last_preview_text:
                 self._update_preview(active_run, text, prefer_html=True)
                 last_preview_text = text
+                preview_state.mark_rendered()
 
             wait_seconds = (
                 _PREVIEW_STREAM_INTERVAL_SECONDS
