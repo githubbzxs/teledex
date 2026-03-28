@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,7 @@ class SessionRecord:
     title: str
     codex_thread_id: str | None
     bound_path: str | None
+    codex_settings: dict[str, Any]
     status: str
     created_at: str
     updated_at: str
@@ -70,6 +72,7 @@ class Storage:
                     title TEXT NOT NULL,
                     codex_thread_id TEXT,
                     bound_path TEXT,
+                    codex_settings TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL DEFAULT 'idle',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -100,6 +103,14 @@ class Storage:
                 );
                 """
             )
+            session_columns = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "codex_settings" not in session_columns:
+                self._conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN codex_settings TEXT NOT NULL DEFAULT '{}'"
+                )
             existing_rows = self._conn.execute(
                 "SELECT id, bound_path FROM sessions WHERE bound_path IS NOT NULL AND TRIM(bound_path) != ''"
             ).fetchall()
@@ -182,9 +193,9 @@ class Storage:
             cursor = self._conn.execute(
                 """
                 INSERT INTO sessions (
-                    user_id, title, codex_thread_id, bound_path, status,
+                    user_id, title, codex_thread_id, bound_path, codex_settings, status,
                     created_at, updated_at, last_active_at
-                ) VALUES (?, ?, NULL, NULL, 'idle', ?, ?, ?)
+                ) VALUES (?, ?, NULL, NULL, '{}', 'idle', ?, ?, ?)
                 """,
                 (user_id, title, now, now, now),
             )
@@ -210,7 +221,7 @@ class Storage:
             rows = self._conn.execute(
                 """
                 SELECT id, user_id, title, codex_thread_id, bound_path, status,
-                       created_at, updated_at, last_active_at
+                       codex_settings, created_at, updated_at, last_active_at
                 FROM sessions
                 WHERE user_id = ?
                 ORDER BY id ASC
@@ -225,7 +236,7 @@ class Storage:
             row = self._conn.execute(
                 """
                 SELECT id, user_id, title, codex_thread_id, bound_path, status,
-                       created_at, updated_at, last_active_at
+                       codex_settings, created_at, updated_at, last_active_at
                 FROM sessions
                 WHERE user_id = ? AND bound_path = ?
                 ORDER BY id ASC
@@ -237,7 +248,7 @@ class Storage:
 
     def get_session(self, session_id: int, user_id: int | None = None) -> SessionRecord | None:
         query = """
-            SELECT id, user_id, title, codex_thread_id, bound_path, status,
+            SELECT id, user_id, title, codex_thread_id, bound_path, codex_settings, status,
                    created_at, updated_at, last_active_at
             FROM sessions
             WHERE id = ?
@@ -359,6 +370,39 @@ class Storage:
             )
             self._conn.commit()
 
+    def update_session_codex_settings(
+        self,
+        session_id: int,
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT codex_settings FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            current_settings = self._decode_codex_settings(
+                str(row["codex_settings"]) if row and row["codex_settings"] else "{}"
+            )
+            for key, value in updates.items():
+                normalized_key = str(key).strip()
+                if not normalized_key:
+                    continue
+                if value is None:
+                    current_settings.pop(normalized_key, None)
+                else:
+                    current_settings[normalized_key] = value
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET codex_settings = ?, updated_at = ?, last_active_at = ?
+                WHERE id = ?
+                """,
+                (json.dumps(current_settings, ensure_ascii=False), now, now, session_id),
+            )
+            self._conn.commit()
+        return current_settings
+
     def update_session_status(self, session_id: int, status: str) -> None:
         now = _utc_now()
         with self._lock:
@@ -424,6 +468,23 @@ class Storage:
             )
             self._conn.commit()
 
+    def get_last_completed_run_excerpt(self, session_id: int) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT final_excerpt
+                FROM runs
+                WHERE session_id = ? AND status = 'completed' AND final_excerpt IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None or row["final_excerpt"] is None:
+            return None
+        text = str(row["final_excerpt"]).strip()
+        return text or None
+
     def _row_to_user(self, row: sqlite3.Row | None) -> UserState | None:
         if row is None:
             return None
@@ -453,8 +514,18 @@ class Storage:
             title=str(row["title"]),
             codex_thread_id=str(row["codex_thread_id"]) if row["codex_thread_id"] else None,
             bound_path=str(row["bound_path"]) if row["bound_path"] else None,
+            codex_settings=self._decode_codex_settings(
+                str(row["codex_settings"]) if row["codex_settings"] else "{}"
+            ),
             status=str(row["status"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             last_active_at=str(row["last_active_at"]),
         )
+
+    def _decode_codex_settings(self, raw: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}

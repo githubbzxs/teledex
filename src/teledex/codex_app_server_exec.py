@@ -532,6 +532,84 @@ def _execution_overrides(exec_mode: str) -> dict[str, str]:
     return {}
 
 
+def _normalize_service_tier(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized == "fast":
+        return "fast"
+    return None
+
+
+def _normalize_personality(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"none", "friendly", "pragmatic"}:
+        return normalized
+    return None
+
+
+def _normalize_approval_policy(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    return {
+        "untrusted": "untrusted",
+        "on-failure": "on-failure",
+        "on-request": "on-request",
+        "never": "never",
+    }.get(normalized)
+
+
+def _normalize_sandbox_mode(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    return {
+        "read-only": "read-only",
+        "workspace-write": "workspace-write",
+        "danger-full-access": "danger-full-access",
+    }.get(normalized)
+
+
+def _build_collaboration_mode(
+    args: argparse.Namespace,
+    fallback_model: str | None,
+    fallback_effort: str | None,
+) -> dict[str, Any] | None:
+    mode = str(getattr(args, "collaboration_mode", "") or "").strip().lower()
+    if mode not in {"default", "plan"}:
+        return None
+    model = str(args.model or fallback_model or "").strip()
+    if not model:
+        return None
+    reasoning_effort = str(args.reasoning_effort or fallback_effort or "").strip().lower()
+    if not reasoning_effort and mode == "plan":
+        reasoning_effort = "high"
+    settings: dict[str, Any] = {
+        "model": model,
+        "developer_instructions": None,
+    }
+    if reasoning_effort:
+        settings["reasoning_effort"] = reasoning_effort
+    return {
+        "mode": mode,
+        "settings": settings,
+    }
+
+
+def _apply_thread_settings(
+    params: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    service_tier = _normalize_service_tier(args.service_tier)
+    personality = _normalize_personality(args.personality)
+    approval_policy = _normalize_approval_policy(args.approval_policy)
+    sandbox_mode = _normalize_sandbox_mode(args.sandbox_mode)
+    if service_tier:
+        params["serviceTier"] = service_tier
+    if personality:
+        params["personality"] = personality
+    if approval_policy:
+        params["approvalPolicy"] = approval_policy
+    if sandbox_mode:
+        params["sandbox"] = sandbox_mode
+    return params
+
+
 def _build_thread_start_params(args: argparse.Namespace) -> dict[str, Any]:
     params: dict[str, Any] = {
         "cwd": str(Path(args.cwd)),
@@ -544,7 +622,7 @@ def _build_thread_start_params(args: argparse.Namespace) -> dict[str, Any]:
         params["model"] = args.model
     if args.search:
         params["config"] = {"web_search": True}
-    return params
+    return _apply_thread_settings(params, args)
 
 
 def _build_thread_resume_params(args: argparse.Namespace) -> dict[str, Any]:
@@ -558,11 +636,17 @@ def _build_thread_resume_params(args: argparse.Namespace) -> dict[str, Any]:
         params["model"] = args.model
     if args.search:
         params["config"] = {"web_search": True}
-    return params
+    return _apply_thread_settings(params, args)
 
 
-def _build_turn_start_params(thread_id: str, prompt: str) -> dict[str, Any]:
-    return {
+def _build_turn_start_params(
+    thread_id: str,
+    prompt: str,
+    args: argparse.Namespace,
+    fallback_model: str | None,
+    fallback_effort: str | None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
         "threadId": thread_id,
         "input": [
             {
@@ -572,6 +656,20 @@ def _build_turn_start_params(thread_id: str, prompt: str) -> dict[str, Any]:
             }
         ],
     }
+    if args.model:
+        params["model"] = args.model
+    service_tier = _normalize_service_tier(args.service_tier)
+    if service_tier:
+        params["serviceTier"] = service_tier
+    if args.reasoning_effort:
+        params["effort"] = args.reasoning_effort
+    personality = _normalize_personality(args.personality)
+    if personality:
+        params["personality"] = personality
+    collaboration_mode = _build_collaboration_mode(args, fallback_model, fallback_effort)
+    if collaboration_mode:
+        params["collaborationMode"] = collaboration_mode
+    return params
 
 
 def _resolve_thread_binding(result: dict[str, Any]) -> tuple[str, str | None]:
@@ -842,8 +940,8 @@ def run(args: argparse.Namespace) -> int:
                 or str(args.model or "").strip()
                 or "loading"
             ),
-            "reasoning_effort": _extract_reasoning_effort(config),
-            "service_tier": _extract_service_tier(config),
+            "reasoning_effort": args.reasoning_effort or _extract_reasoning_effort(config),
+            "service_tier": args.service_tier or _extract_service_tier(config),
             "status_line_items": _extract_status_line_items(config),
             "context_remaining_percent": 100,
             "last_emitted_line": "",
@@ -877,7 +975,13 @@ def run(args: argparse.Namespace) -> int:
         )
         request_id = client.send_request(
             "turn/start",
-            _build_turn_start_params(thread_id, prompt),
+            _build_turn_start_params(
+                thread_id,
+                prompt,
+                args,
+                str(status_line_state.get("model") or "").strip() or None,
+                _extract_reasoning_effort(config),
+            ),
         )
         request_acked = False
         turn_completed = False
@@ -963,6 +1067,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--status-file")
     parser.add_argument("--thread-id")
     parser.add_argument("--model")
+    parser.add_argument("--reasoning-effort")
+    parser.add_argument("--service-tier")
+    parser.add_argument("--personality")
+    parser.add_argument("--approval-policy")
+    parser.add_argument("--sandbox-mode")
+    parser.add_argument("--collaboration-mode")
     parser.add_argument("--search", action="store_true")
     parser.add_argument("--persist-extended-history", action="store_true")
     args = parser.parse_args()

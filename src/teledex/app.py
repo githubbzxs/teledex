@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -64,8 +65,50 @@ _LOCAL_COMMANDS = {
     "/tstop",
 }
 _MIRRORED_CODEX_COMMANDS = {
+    "/agent",
+    "/apps",
+    "/approvals",
+    "/bettercodex",
+    "/clean",
+    "/clear",
+    "/collab",
+    "/compact",
+    "/copy",
+    "/debug-config",
+    "/diff",
+    "/exit",
+    "/experimental",
+    "/fast",
+    "/feedback",
+    "/fork",
+    "/init",
+    "/logout",
+    "/mcp",
+    "/model",
     "/new",
+    "/permissions",
+    "/personality",
+    "/plan",
+    "/ps",
+    "/quit",
+    "/realtime",
+    "/rename",
+    "/resume",
+    "/review",
+    "/rollout",
+    "/sandbox-add-read-dir",
+    "/settings",
+    "/skills",
+    "/status",
+    "/statusline",
+    "/subagents",
+    "/theme",
 }
+_APPROVAL_POLICY_VALUES = ("untrusted", "on-failure", "on-request", "never")
+_SANDBOX_MODE_VALUES = ("read-only", "workspace-write", "danger-full-access")
+_PERSONALITY_VALUES = ("none", "friendly", "pragmatic")
+_REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
+_COLLABORATION_MODE_VALUES = ("default", "plan")
 
 
 def _session_title_from_path(path: Path) -> str:
@@ -731,15 +774,44 @@ class TeledexApp:
         )
 
     def _handle_codex_command(self, incoming: IncomingMessage) -> None:
+        command_text = incoming.text.split()[0]
         command = self._extract_command(incoming.text)
+        args = incoming.text[len(command_text) :].strip()
 
-        if command == "/new":
-            self._handle_codex_new_command(incoming)
+        handler_map = {
+            "/new": self._handle_codex_new_command,
+            "/clear": self._handle_codex_clear_command,
+            "/resume": self._handle_codex_resume_command,
+            "/fork": self._handle_codex_fork_command,
+            "/rename": self._handle_codex_rename_command,
+            "/init": self._handle_codex_init_command,
+            "/review": self._handle_codex_review_command,
+            "/model": self._handle_codex_model_command,
+            "/fast": self._handle_codex_fast_command,
+            "/personality": self._handle_codex_personality_command,
+            "/approvals": self._handle_codex_approvals_command,
+            "/permissions": self._handle_codex_permissions_command,
+            "/plan": self._handle_codex_plan_command,
+            "/collab": self._handle_codex_collab_command,
+            "/status": self._handle_codex_status_command,
+            "/debug-config": self._handle_codex_debug_config_command,
+            "/mcp": self._handle_codex_mcp_command,
+            "/apps": self._handle_codex_apps_command,
+            "/skills": self._handle_codex_skills_command,
+            "/experimental": self._handle_codex_experimental_command,
+            "/diff": self._handle_codex_diff_command,
+            "/rollout": self._handle_codex_rollout_command,
+            "/copy": self._handle_codex_copy_command,
+            "/compact": self._handle_codex_compact_command,
+            "/clean": self._handle_codex_clean_command,
+        }
+        handler = handler_map.get(command)
+        if handler is not None:
+            handler(incoming, args)
             return
+        self._handle_unsupported_codex_command(incoming, command)
 
-        self._handle_prompt(incoming)
-
-    def _handle_codex_new_command(self, incoming: IncomingMessage) -> None:
+    def _handle_codex_new_command(self, incoming: IncomingMessage, args: str = "") -> None:
         session = self.storage.get_active_session(
             incoming.user_id,
             incoming.chat_id,
@@ -760,18 +832,743 @@ class TeledexApp:
             )
             return
 
-        self.storage.clear_session_thread_id(session.id)
-        if session.bound_path:
-            message = (
-                f"已在会话 #{session.id} 中开启新的 Codex 对话。\n"
-                f"目录保持不变：{session.bound_path}"
+        self._reset_session_thread(session.id)
+        suffix = (
+            f"目录保持不变：{session.bound_path}"
+            if session.bound_path
+            else "当前会话还没有绑定目录，请先用 /tbind <绝对路径>。"
+        )
+        self._safe_send_message(
+            incoming.chat_id,
+            f"已在会话 #{session.id} 中开启新的 Codex 对话。\n{suffix}",
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_clear_command(self, incoming: IncomingMessage, args: str = "") -> None:
+        session = self._get_active_session_or_notify(incoming)
+        if session is None:
+            return
+        if self._is_session_running(session.id):
+            self._safe_send_message(
+                incoming.chat_id,
+                f"会话 #{session.id} 正在执行中，/clear 暂时不可用，请稍后或先 /tstop。",
+                incoming.message_thread_id,
             )
+            return
+        self._reset_session_thread(session.id)
+        self._safe_send_message(
+            incoming.chat_id,
+            f"会话 #{session.id} 已清空当前 Codex 对话。\nTelegram 里的历史消息不会删除，下一条消息会从新对话开始。",
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_resume_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        cwd = Path(session.bound_path)
+        threads = self.runner.list_threads(cwd, limit=12)
+        if not args:
+            if not threads:
+                self._safe_send_message(
+                    incoming.chat_id,
+                    "当前目录下没有可恢复的 Codex 线程。",
+                    incoming.message_thread_id,
+                )
+                return
+            lines = ["当前目录最近的 Codex 线程："]
+            for index, thread in enumerate(threads, start=1):
+                name = f" [{thread.name}]" if thread.name else ""
+                preview = thread.preview or "无预览"
+                lines.append(f"{index}. {thread.thread_id}{name}\n{preview}")
+            lines.append("\n用法：/resume <编号或thread_id>")
+            self._send_long_message(
+                incoming.chat_id,
+                "\n\n".join(lines),
+                incoming.message_thread_id,
+            )
+            return
+        thread = self._resolve_thread_reference(args, threads)
+        if thread is None:
+            self._safe_send_message(
+                incoming.chat_id,
+                "没有找到对应的线程。先直接 `/resume` 查看列表，再用编号或完整 thread_id 恢复。",
+                incoming.message_thread_id,
+                parse_mode="HTML",
+            )
+            return
+        if self._is_session_running(session.id):
+            self._safe_send_message(
+                incoming.chat_id,
+                f"会话 #{session.id} 正在执行中，/resume 暂时不可用，请稍后或先 /tstop。",
+                incoming.message_thread_id,
+            )
+            return
+        self.storage.update_session_thread_id(session.id, thread.thread_id)
+        self.storage.update_session_status(session.id, "idle")
+        title_text = f"\n名称：{thread.name}" if thread.name else ""
+        self._safe_send_message(
+            incoming.chat_id,
+            f"会话 #{session.id} 已恢复到 Codex 线程：{thread.thread_id}{title_text}",
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_fork_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        if self._is_session_running(session.id):
+            self._safe_send_message(
+                incoming.chat_id,
+                f"会话 #{session.id} 正在执行中，/fork 暂时不可用，请稍后或先 /tstop。",
+                incoming.message_thread_id,
+            )
+            return
+        if not session.codex_thread_id:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前会话还没有可 fork 的 Codex 线程，先发起一次对话再试。",
+                incoming.message_thread_id,
+            )
+            return
+        forked = self.runner.fork_thread(
+            Path(session.bound_path),
+            session.codex_thread_id,
+            session.codex_settings,
+        )
+        thread = forked.get("thread") if isinstance(forked, dict) else {}
+        new_thread_id = str(thread.get("id") or "").strip()
+        if not new_thread_id:
+            raise RuntimeError("fork 后未返回新的 thread_id")
+        self.storage.update_session_thread_id(session.id, new_thread_id)
+        self._safe_send_message(
+            incoming.chat_id,
+            f"会话 #{session.id} 已 fork 到新的 Codex 线程：{new_thread_id}",
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_rename_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        if not session.codex_thread_id:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前会话还没有活动的 Codex 线程，先发起一次对话再试。",
+                incoming.message_thread_id,
+            )
+            return
+        name = args.strip()
+        if not name:
+            self._safe_send_message(
+                incoming.chat_id,
+                "用法：/rename <新标题>",
+                incoming.message_thread_id,
+            )
+            return
+        self.runner.set_thread_name(Path(session.bound_path), session.codex_thread_id, name)
+        self._safe_send_message(
+            incoming.chat_id,
+            f"当前 Codex 线程已重命名为：{name}",
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_init_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        init_target = Path(session.bound_path) / "AGENTS.md"
+        if init_target.exists():
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前目录已经存在 AGENTS.md，Codex 原生 /init 也会跳过覆盖。",
+                incoming.message_thread_id,
+            )
+            return
+        prompt = (
+            "create an AGENTS.md file with instructions for Codex in the current project root. "
+            "keep it concise and practical."
+        )
+        forwarded = IncomingMessage(
+            chat_id=incoming.chat_id,
+            user_id=incoming.user_id,
+            text=prompt,
+            message_id=incoming.message_id,
+            message_thread_id=incoming.message_thread_id,
+        )
+        self._handle_prompt(forwarded)
+
+    def _handle_codex_review_command(self, incoming: IncomingMessage, args: str) -> None:
+        prompt = args.strip() or "review my current changes and find issues"
+        forwarded = IncomingMessage(
+            chat_id=incoming.chat_id,
+            user_id=incoming.user_id,
+            text=prompt,
+            message_id=incoming.message_id,
+            message_thread_id=incoming.message_thread_id,
+        )
+        self._handle_prompt(forwarded)
+
+    def _handle_codex_model_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        cwd = Path(session.bound_path)
+        raw = args.strip()
+        if not raw or raw == "show":
+            self._safe_send_message(
+                incoming.chat_id,
+                self._format_model_status(session),
+                incoming.message_thread_id,
+            )
+            return
+        if raw == "list":
+            models = self.runner.list_models(cwd)
+            lines = ["可用模型："]
+            for item in models:
+                if not isinstance(item, dict):
+                    continue
+                model = str(item.get("model") or "").strip()
+                if not model:
+                    continue
+                efforts = item.get("supportedReasoningEfforts") or []
+                effort_labels = [
+                    str(option.get("reasoningEffort") or "").strip()
+                    for option in efforts
+                    if isinstance(option, dict) and str(option.get("reasoningEffort") or "").strip()
+                ]
+                suffix = f" | effort: {', '.join(effort_labels)}" if effort_labels else ""
+                lines.append(f"- {model}{suffix}")
+            lines.append("\n用法：/model <model> [effort]")
+            self._send_long_message(
+                incoming.chat_id,
+                "\n".join(lines),
+                incoming.message_thread_id,
+            )
+            return
+        parts = raw.split()
+        model = parts[0].strip()
+        effort = parts[1].strip().lower() if len(parts) > 1 else None
+        if effort and effort not in _REASONING_EFFORT_VALUES:
+            self._safe_send_message(
+                incoming.chat_id,
+                f"不支持的 reasoning effort：{effort}\n可选值：{', '.join(_REASONING_EFFORT_VALUES)}",
+                incoming.message_thread_id,
+            )
+            return
+        updates = {
+            "model": None if model == "default" else model,
+            "reasoning_effort": None if effort in {None, "default"} else effort,
+        }
+        self._apply_session_codex_settings(
+            incoming,
+            session,
+            updates,
+            self._format_model_status_message(model, effort),
+        )
+
+    def _handle_codex_fast_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        current = str(session.codex_settings.get("service_tier") or "").strip().lower() == "fast"
+        action = args.strip().lower()
+        if action in {"", "toggle"}:
+            enabled = not current
+        elif action == "status":
+            self._safe_send_message(
+                incoming.chat_id,
+                f"Fast 模式当前为：{'on' if current else 'off'}",
+                incoming.message_thread_id,
+            )
+            return
+        elif action == "on":
+            enabled = True
+        elif action == "off":
+            enabled = False
         else:
-            message = (
-                f"已在会话 #{session.id} 中开启新的 Codex 对话。\n"
-                "当前会话还没有绑定目录，请先用 /tbind <绝对路径>。"
+            self._safe_send_message(
+                incoming.chat_id,
+                "用法：/fast [on|off|status]",
+                incoming.message_thread_id,
             )
-        self._safe_send_message(incoming.chat_id, message, incoming.message_thread_id)
+            return
+        self._apply_session_codex_settings(
+            incoming,
+            session,
+            {"service_tier": "fast" if enabled else None},
+            f"Fast 模式已设为：{'on' if enabled else 'off'}",
+        )
+
+    def _handle_codex_personality_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        value = args.strip().lower()
+        if not value or value == "show":
+            current = str(session.codex_settings.get("personality") or "default")
+            self._safe_send_message(
+                incoming.chat_id,
+                f"当前 personality：{current}\n可选值：default, {', '.join(_PERSONALITY_VALUES)}",
+                incoming.message_thread_id,
+            )
+            return
+        if value == "default":
+            normalized = None
+        elif value in _PERSONALITY_VALUES:
+            normalized = value
+        else:
+            self._safe_send_message(
+                incoming.chat_id,
+                f"不支持的 personality：{value}\n可选值：default, {', '.join(_PERSONALITY_VALUES)}",
+                incoming.message_thread_id,
+            )
+            return
+        self._apply_session_codex_settings(
+            incoming,
+            session,
+            {"personality": normalized},
+            f"Personality 已更新为：{normalized or 'default'}",
+        )
+
+    def _handle_codex_approvals_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        value = args.strip().lower()
+        if not value or value == "show":
+            current = str(session.codex_settings.get("approval_policy") or "default")
+            self._safe_send_message(
+                incoming.chat_id,
+                f"当前 approval policy：{current}\n可选值：default, {', '.join(_APPROVAL_POLICY_VALUES)}",
+                incoming.message_thread_id,
+            )
+            return
+        if value == "default":
+            normalized = None
+        elif value in _APPROVAL_POLICY_VALUES:
+            normalized = value
+        else:
+            self._safe_send_message(
+                incoming.chat_id,
+                f"不支持的 approval policy：{value}\n可选值：default, {', '.join(_APPROVAL_POLICY_VALUES)}",
+                incoming.message_thread_id,
+            )
+            return
+        self._apply_session_codex_settings(
+            incoming,
+            session,
+            {"approval_policy": normalized},
+            f"Approval policy 已更新为：{normalized or 'default'}",
+        )
+
+    def _handle_codex_permissions_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        value = args.strip().lower()
+        if not value or value == "show":
+            current = str(session.codex_settings.get("sandbox_mode") or "default")
+            self._safe_send_message(
+                incoming.chat_id,
+                f"当前 sandbox mode：{current}\n可选值：default, {', '.join(_SANDBOX_MODE_VALUES)}",
+                incoming.message_thread_id,
+            )
+            return
+        if value == "default":
+            normalized = None
+        elif value in _SANDBOX_MODE_VALUES:
+            normalized = value
+        else:
+            self._safe_send_message(
+                incoming.chat_id,
+                f"不支持的 sandbox mode：{value}\n可选值：default, {', '.join(_SANDBOX_MODE_VALUES)}",
+                incoming.message_thread_id,
+            )
+            return
+        self._apply_session_codex_settings(
+            incoming,
+            session,
+            {"sandbox_mode": normalized},
+            f"Sandbox mode 已更新为：{normalized or 'default'}",
+        )
+
+    def _handle_codex_plan_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        value = args.strip().lower()
+        if value in {"", "on", "plan"}:
+            normalized = "plan"
+        elif value in {"off", "default"}:
+            normalized = "default"
+        else:
+            self._safe_send_message(
+                incoming.chat_id,
+                "用法：/plan [on|off]",
+                incoming.message_thread_id,
+            )
+            return
+        self._apply_session_codex_settings(
+            incoming,
+            session,
+            {"collaboration_mode": normalized},
+            f"Collaboration mode 已更新为：{normalized}",
+        )
+
+    def _handle_codex_collab_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        cwd = Path(session.bound_path)
+        value = args.strip().lower()
+        if not value or value == "show":
+            current = str(session.codex_settings.get("collaboration_mode") or "default")
+            self._safe_send_message(
+                incoming.chat_id,
+                f"当前 collaboration mode：{current}\n用法：/collab list 或 /collab <default|plan>",
+                incoming.message_thread_id,
+            )
+            return
+        if value == "list":
+            modes = self.runner.list_collaboration_modes(cwd)
+            available = [
+                str(item.get("name") or "").strip()
+                for item in modes
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            ]
+            text = "可用 collaboration mode：\n" + "\n".join(f"- {item}" for item in available)
+            self._safe_send_message(incoming.chat_id, text, incoming.message_thread_id)
+            return
+        if value not in _COLLABORATION_MODE_VALUES:
+            self._safe_send_message(
+                incoming.chat_id,
+                f"不支持的 collaboration mode：{value}\n可选值：{', '.join(_COLLABORATION_MODE_VALUES)}",
+                incoming.message_thread_id,
+            )
+            return
+        self._apply_session_codex_settings(
+            incoming,
+            session,
+            {"collaboration_mode": value},
+            f"Collaboration mode 已更新为：{value}",
+        )
+
+    def _handle_codex_status_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._get_active_session_or_notify(incoming)
+        if session is None:
+            return
+        lines = [
+            f"会话 #{session.id}",
+            f"目录：{session.bound_path or '未绑定目录'}",
+            f"线程：{session.codex_thread_id or '未创建'}",
+            f"状态：{session.status}",
+            f"模型：{session.codex_settings.get('model') or self.config.codex_model or 'default'}",
+            f"effort：{session.codex_settings.get('reasoning_effort') or 'default'}",
+            f"Fast：{'on' if session.codex_settings.get('service_tier') == 'fast' else 'off'}",
+            f"Personality：{session.codex_settings.get('personality') or 'default'}",
+            f"Approval：{session.codex_settings.get('approval_policy') or 'default'}",
+            f"Sandbox：{session.codex_settings.get('sandbox_mode') or 'default'}",
+            f"Collab：{session.codex_settings.get('collaboration_mode') or 'default'}",
+        ]
+        self._safe_send_message(incoming.chat_id, "\n".join(lines), incoming.message_thread_id)
+
+    def _handle_codex_debug_config_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        config = self.runner.read_config(Path(session.bound_path))
+        effective = config.get("config") if isinstance(config, dict) else {}
+        layers = config.get("layers") if isinstance(config, dict) else []
+        lines = ["Codex 配置摘要："]
+        if isinstance(effective, dict):
+            for key in (
+                "model",
+                "model_reasoning_effort",
+                "service_tier",
+                "approval_policy",
+                "sandbox_mode",
+                "web_search",
+                "profile",
+            ):
+                if key in effective:
+                    lines.append(f"- {key}: {effective.get(key)}")
+        if isinstance(layers, list) and layers:
+            lines.append("")
+            lines.append("配置层：")
+            for layer in layers:
+                if not isinstance(layer, dict):
+                    continue
+                lines.append(f"- {layer.get('name')}: v{layer.get('version')}")
+        self._send_long_message(
+            incoming.chat_id,
+            "\n".join(lines),
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_mcp_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        servers = self.runner.list_mcp_servers(Path(session.bound_path))
+        if not servers:
+            self._safe_send_message(incoming.chat_id, "当前没有 MCP 服务。", incoming.message_thread_id)
+            return
+        lines = ["MCP 服务："]
+        for server in servers:
+            if not isinstance(server, dict):
+                continue
+            name = str(server.get("name") or "").strip() or "unknown"
+            tools = server.get("tools") or {}
+            resources = server.get("resources") or []
+            lines.append(f"- {name} | tools={len(tools)} | resources={len(resources)}")
+        self._send_long_message(incoming.chat_id, "\n".join(lines), incoming.message_thread_id)
+
+    def _handle_codex_apps_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        apps = self.runner.list_apps(Path(session.bound_path), session.codex_thread_id)
+        if not apps:
+            self._safe_send_message(incoming.chat_id, "当前没有可见 Apps。", incoming.message_thread_id)
+            return
+        lines = ["Apps："]
+        for app in apps:
+            if not isinstance(app, dict):
+                continue
+            name = str(app.get("name") or "").strip()
+            if not name:
+                continue
+            description = str(app.get("description") or "").strip()
+            enabled = "enabled" if app.get("isEnabled", False) else "disabled"
+            lines.append(f"- {name} [{enabled}] {description}".strip())
+        self._send_long_message(incoming.chat_id, "\n".join(lines), incoming.message_thread_id)
+
+    def _handle_codex_skills_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        skills = self.runner.list_skills(Path(session.bound_path))
+        if not skills:
+            self._safe_send_message(incoming.chat_id, "当前目录没有检测到 Skills。", incoming.message_thread_id)
+            return
+        lines = ["Skills："]
+        for item in skills:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            description = str(item.get("description") or "").strip()
+            if name:
+                lines.append(f"- {name} {description}".strip())
+        self._send_long_message(incoming.chat_id, "\n".join(lines), incoming.message_thread_id)
+
+    def _handle_codex_experimental_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        features = self.runner.list_experimental_features(Path(session.bound_path))
+        if not features:
+            self._safe_send_message(incoming.chat_id, "当前没有实验特性列表。", incoming.message_thread_id)
+            return
+        lines = ["Experimental Features："]
+        for item in features:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            stage = str(item.get("stage") or "").strip()
+            enabled = "on" if item.get("enabled") else "off"
+            lines.append(f"- {name} [{stage}] {enabled}")
+        self._send_long_message(incoming.chat_id, "\n".join(lines), incoming.message_thread_id)
+
+    def _handle_codex_diff_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        cwd = Path(session.bound_path)
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "diff", "--stat", "--", "."],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        detail = subprocess.run(
+            ["git", "-C", str(cwd), "diff", "--", "."],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 and detail.returncode != 0:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前目录不是 Git 仓库，或无法计算 diff。",
+                incoming.message_thread_id,
+            )
+            return
+        text = (result.stdout.strip() + "\n\n" + detail.stdout.strip()).strip() or "当前没有改动。"
+        self._send_long_message(incoming.chat_id, text, incoming.message_thread_id)
+
+    def _handle_codex_rollout_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        if not session.codex_thread_id:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前会话还没有活动的 Codex 线程。",
+                incoming.message_thread_id,
+            )
+            return
+        payload = self.runner.read_thread(Path(session.bound_path), session.codex_thread_id)
+        thread = payload.get("thread") if isinstance(payload, dict) else {}
+        path_text = str(thread.get("path") or "").strip()
+        self._safe_send_message(
+            incoming.chat_id,
+            path_text or "当前线程还没有 rollout 路径。",
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_copy_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._get_active_session_or_notify(incoming)
+        if session is None:
+            return
+        excerpt = self.storage.get_last_completed_run_excerpt(session.id)
+        if not excerpt:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前还没有可复制的最终回复。",
+                incoming.message_thread_id,
+            )
+            return
+        self._send_long_message(incoming.chat_id, excerpt, incoming.message_thread_id, prefer_html=True)
+
+    def _handle_codex_compact_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        if not session.codex_thread_id:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前会话还没有可 compact 的 Codex 线程。",
+                incoming.message_thread_id,
+            )
+            return
+        self.runner.compact_thread(Path(session.bound_path), session.codex_thread_id)
+        self._safe_send_message(
+            incoming.chat_id,
+            "已触发当前 Codex 线程的 compact。",
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_clean_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        if not session.codex_thread_id:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前会话还没有活动的 Codex 线程。",
+                incoming.message_thread_id,
+            )
+            return
+        self.runner.clean_background_terminals(Path(session.bound_path), session.codex_thread_id)
+        self._safe_send_message(
+            incoming.chat_id,
+            "已请求清理当前线程的后台终端。",
+            incoming.message_thread_id,
+        )
+
+    def _handle_unsupported_codex_command(self, incoming: IncomingMessage, command: str) -> None:
+        self._safe_send_message(
+            incoming.chat_id,
+            (
+                f"{command} 已被识别为 Codex 内建命令，但当前 Telegram 桥接还没有对应的无弹窗实现。\n"
+                "它不会再被当成普通文本发给模型。"
+            ),
+            incoming.message_thread_id,
+        )
+
+    def _get_active_session_or_notify(self, incoming: IncomingMessage) -> SessionRecord | None:
+        session = self.storage.get_active_session(
+            incoming.user_id,
+            incoming.chat_id,
+            incoming.message_thread_id,
+        )
+        if session is None:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前没有活跃会话，请先用 /tnew 创建，或用 /tuse 切换。",
+                incoming.message_thread_id,
+            )
+        return session
+
+    def _require_bound_session_or_notify(self, incoming: IncomingMessage) -> SessionRecord | None:
+        session = self._get_active_session_or_notify(incoming)
+        if session is None:
+            return None
+        if not session.bound_path:
+            self._safe_send_message(
+                incoming.chat_id,
+                "当前会话还没有绑定目录，请先用 /tbind <绝对路径>。",
+                incoming.message_thread_id,
+            )
+            return None
+        return session
+
+    def _reset_session_thread(self, session_id: int) -> None:
+        self.storage.clear_session_thread_id(session_id)
+
+    def _apply_session_codex_settings(
+        self,
+        incoming: IncomingMessage,
+        session: SessionRecord,
+        updates: dict[str, object | None],
+        success_message: str,
+    ) -> None:
+        if self._is_session_running(session.id):
+            self._safe_send_message(
+                incoming.chat_id,
+                f"会话 #{session.id} 正在执行中，请稍后或先 /tstop 后再改 Codex 设置。",
+                incoming.message_thread_id,
+            )
+            return
+        self.storage.update_session_codex_settings(session.id, dict(updates))
+        self._reset_session_thread(session.id)
+        self._safe_send_message(
+            incoming.chat_id,
+            f"{success_message}\n已为当前会话重置 Codex 线程，下一条消息会按新设置生效。",
+            incoming.message_thread_id,
+        )
+
+    def _resolve_thread_reference(
+        self,
+        raw: str,
+        threads: list,
+    ) -> object | None:
+        value = raw.strip()
+        if not value:
+            return None
+        if value.isdigit():
+            index = int(value) - 1
+            if 0 <= index < len(threads):
+                return threads[index]
+        for thread in threads:
+            if getattr(thread, "thread_id", "") == value:
+                return thread
+        return None
+
+    def _format_model_status(self, session: SessionRecord) -> str:
+        return (
+            f"当前模型：{session.codex_settings.get('model') or self.config.codex_model or 'default'}\n"
+            f"当前 effort：{session.codex_settings.get('reasoning_effort') or 'default'}\n"
+            "用法：/model list 或 /model <model> [effort]"
+        )
+
+    def _format_model_status_message(self, model: str, effort: str | None) -> str:
+        target_model = "default" if model == "default" else model
+        target_effort = "default" if effort in {None, 'default'} else effort
+        return f"模型已更新为：{target_model}\nReasoning effort：{target_effort}"
 
     def _handle_prompt(self, incoming: IncomingMessage) -> None:
         session = self.storage.get_active_session(
@@ -859,6 +1656,7 @@ class TeledexApp:
                 thread_id=session.codex_thread_id,
                 runtime_dir=self.config.state_dir / "runtime",
                 session_id=session.id,
+                settings=session.codex_settings,
             )
             with self._active_runs_lock:
                 current = self._active_runs.get(session.id)

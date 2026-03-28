@@ -73,6 +73,32 @@ class StorageTestCase(unittest.TestCase):
         self.assertEqual(fetched.id, session.id)
         self.assertEqual(fetched.title, "demo")
 
+    def test_update_session_codex_settings_persists_json_payload(self) -> None:
+        self.storage.ensure_user(3, chat_id=102, message_thread_id=None)
+        session = self.storage.create_session(3, "会话")
+
+        settings = self.storage.update_session_codex_settings(
+            session.id,
+            {
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+                "service_tier": "fast",
+            },
+        )
+
+        fetched = self.storage.get_session(session.id, 3)
+        self.assertEqual(
+            settings,
+            {
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+                "service_tier": "fast",
+            },
+        )
+        self.assertIsNotNone(fetched)
+        assert fetched is not None
+        self.assertEqual(fetched.codex_settings, settings)
+
 
 if __name__ == "__main__":
     unittest.main()

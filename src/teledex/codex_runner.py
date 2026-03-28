@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import AppConfig
+from .codex_app_server_exec import AppServerClient
 
 
 @dataclass(slots=True)
@@ -45,6 +46,16 @@ class ParsedCodexEvent:
     tool_output_text: str | None = None
     thread_id: str | None = None
     final_message: str | None = None
+
+
+@dataclass(slots=True)
+class CodexThreadSummary:
+    thread_id: str
+    preview: str
+    cwd: str
+    updated_at: int
+    name: str | None = None
+    path: str | None = None
 
 
 def _normalize_status_text(text: str) -> str:
@@ -106,6 +117,7 @@ class CodexRunner:
         thread_id: str | None,
         runtime_dir: Path,
         session_id: int,
+        settings: dict[str, Any] | None = None,
     ) -> CodexProcessHandle:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         output_file = Path(
@@ -132,6 +144,7 @@ class CodexRunner:
             event_log_file=event_log_file,
             status_file=status_file,
             prompt_file=prompt_file,
+            settings=settings or {},
         )
         shell_command = self._build_shell_command(cwd, command)
         self.logger.info("通过 tmux 启动 Codex 命令：%s", shell_command)
@@ -298,6 +311,208 @@ class CodexRunner:
     def terminate(self, handle: CodexProcessHandle) -> None:
         self._run_tmux([self.config.tmux_bin, "send-keys", "-t", handle.tmux_target, "C-c"])
 
+    def list_threads(self, cwd: Path, limit: int = 10) -> list[CodexThreadSummary]:
+        def _request(client: AppServerClient) -> list[CodexThreadSummary]:
+            response = client.request_simple(
+                "thread/list",
+                {
+                    "limit": limit,
+                    "cwd": str(cwd),
+                    "archived": False,
+                },
+            )
+            data = response.get("data") if isinstance(response, dict) else []
+            results: list[CodexThreadSummary] = []
+            if not isinstance(data, list):
+                return results
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                thread_id = str(item.get("id") or "").strip()
+                if not thread_id:
+                    continue
+                results.append(
+                    CodexThreadSummary(
+                        thread_id=thread_id,
+                        preview=str(item.get("preview") or "").strip(),
+                        cwd=str(item.get("cwd") or "").strip(),
+                        updated_at=int(item.get("updatedAt") or 0),
+                        name=str(item.get("name")).strip() if item.get("name") else None,
+                        path=str(item.get("path")).strip() if item.get("path") else None,
+                    )
+                )
+            return results
+
+        return self._with_app_server(cwd, _request)
+
+    def read_thread(self, cwd: Path, thread_id: str) -> dict[str, Any]:
+        return self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "thread/read",
+                {
+                    "threadId": thread_id,
+                    "includeTurns": False,
+                },
+            ),
+        )
+
+    def set_thread_name(self, cwd: Path, thread_id: str, name: str) -> None:
+        self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "thread/name/set",
+                {
+                    "threadId": thread_id,
+                    "name": name,
+                },
+            ),
+        )
+
+    def fork_thread(
+        self,
+        cwd: Path,
+        thread_id: str,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "cwd": str(cwd),
+            "persistExtendedHistory": self.config.codex_persist_extended_history,
+        }
+        params.update(self._thread_settings_args(settings or {}))
+        return self._with_app_server(
+            cwd,
+            lambda client: client.request_simple("thread/fork", params),
+        )
+
+    def compact_thread(self, cwd: Path, thread_id: str) -> None:
+        self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "thread/compact/start",
+                {
+                    "threadId": thread_id,
+                },
+            ),
+        )
+
+    def review_thread(self, cwd: Path, thread_id: str, instructions: str | None = None) -> None:
+        target: dict[str, Any]
+        if instructions and instructions.strip():
+            target = {
+                "type": "custom",
+                "instructions": instructions.strip(),
+            }
+        else:
+            target = {"type": "uncommittedChanges"}
+        self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "review/start",
+                {
+                    "threadId": thread_id,
+                    "target": target,
+                },
+            ),
+        )
+
+    def list_models(self, cwd: Path, limit: int = 50) -> list[dict[str, Any]]:
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "model/list",
+                {
+                    "limit": limit,
+                },
+            ),
+        )
+        data = response.get("data") if isinstance(response, dict) else []
+        return data if isinstance(data, list) else []
+
+    def list_collaboration_modes(self, cwd: Path) -> list[dict[str, Any]]:
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple("collaborationMode/list", {}),
+        )
+        data = response.get("data") if isinstance(response, dict) else []
+        return data if isinstance(data, list) else []
+
+    def read_config(self, cwd: Path) -> dict[str, Any]:
+        return self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "config/read",
+                {
+                    "cwd": str(cwd),
+                    "includeLayers": True,
+                },
+            ),
+        )
+
+    def list_mcp_servers(self, cwd: Path, limit: int = 50) -> list[dict[str, Any]]:
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "mcpServerStatus/list",
+                {"limit": limit},
+            ),
+        )
+        data = response.get("data") if isinstance(response, dict) else []
+        return data if isinstance(data, list) else []
+
+    def list_apps(
+        self,
+        cwd: Path,
+        thread_id: str | None,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "app/list",
+                {
+                    "limit": limit,
+                    "threadId": thread_id,
+                },
+            ),
+        )
+        data = response.get("data") if isinstance(response, dict) else []
+        return data if isinstance(data, list) else []
+
+    def list_skills(self, cwd: Path) -> list[dict[str, Any]]:
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "skills/list",
+                {
+                    "cwds": [str(cwd)],
+                },
+            ),
+        )
+        data = response.get("data") if isinstance(response, dict) else []
+        return data if isinstance(data, list) else []
+
+    def list_experimental_features(self, cwd: Path, limit: int = 50) -> list[dict[str, Any]]:
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "experimentalFeature/list",
+                {"limit": limit},
+            ),
+        )
+        data = response.get("data") if isinstance(response, dict) else []
+        return data if isinstance(data, list) else []
+
+    def clean_background_terminals(self, cwd: Path, thread_id: str) -> None:
+        self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "thread/backgroundTerminals/clean",
+                {"threadId": thread_id},
+            ),
+        )
+
     def _build_command(
         self,
         cwd: Path,
@@ -306,7 +521,9 @@ class CodexRunner:
         event_log_file: Path,
         status_file: Path,
         prompt_file: Path,
+        settings: dict[str, Any] | None = None,
     ) -> list[str]:
+        effective_settings = settings or {}
         helper_path = Path(__file__).with_name("codex_app_server_exec.py").resolve()
         command: list[str] = [
             sys.executable,
@@ -333,6 +550,20 @@ class CodexRunner:
 
         if self.config.codex_model:
             command.extend(["--model", self.config.codex_model])
+        if effective_settings.get("model"):
+            command.extend(["--model", str(effective_settings["model"])])
+        if effective_settings.get("reasoning_effort"):
+            command.extend(["--reasoning-effort", str(effective_settings["reasoning_effort"])])
+        if effective_settings.get("service_tier"):
+            command.extend(["--service-tier", str(effective_settings["service_tier"])])
+        if effective_settings.get("personality"):
+            command.extend(["--personality", str(effective_settings["personality"])])
+        if effective_settings.get("approval_policy"):
+            command.extend(["--approval-policy", str(effective_settings["approval_policy"])])
+        if effective_settings.get("sandbox_mode"):
+            command.extend(["--sandbox-mode", str(effective_settings["sandbox_mode"])])
+        if effective_settings.get("collaboration_mode"):
+            command.extend(["--collaboration-mode", str(effective_settings["collaboration_mode"])])
 
         if self.config.codex_enable_search:
             command.append("--search")
@@ -366,6 +597,27 @@ class CodexRunner:
 
     def _run_tmux(self, command: list[str]) -> None:
         subprocess.run(command, check=True, capture_output=True, text=True)
+
+    def _with_app_server(self, cwd: Path, callback: Callable[[AppServerClient], Any]) -> Any:
+        client = AppServerClient.start(self.config.codex_bin, cwd.resolve())
+        try:
+            return callback(client)
+        finally:
+            client.close()
+
+    def _thread_settings_args(self, settings: dict[str, Any]) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if settings.get("model"):
+            params["model"] = str(settings["model"])
+        if settings.get("service_tier"):
+            params["serviceTier"] = str(settings["service_tier"])
+        if settings.get("personality"):
+            params["personality"] = str(settings["personality"])
+        if settings.get("approval_policy"):
+            params["approvalPolicy"] = str(settings["approval_policy"])
+        if settings.get("sandbox_mode"):
+            params["sandbox"] = str(settings["sandbox_mode"])
+        return params
 
     def _drain_event_log(
         self,

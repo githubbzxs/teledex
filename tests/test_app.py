@@ -597,7 +597,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(commands, [])
         self.assertEqual(codex_commands, ["/new"])
 
-    def test_handle_update_keeps_other_unknown_slash_command_as_prompt(self) -> None:
+    def test_handle_update_routes_other_builtin_codex_command_to_codex_handler(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         prompts: list[str] = []
         commands: list[str] = []
@@ -629,7 +629,43 @@ class AppMessagingTestCase(unittest.TestCase):
             }
         )
 
-        self.assertEqual(prompts, ["/model"])
+        self.assertEqual(prompts, [])
+        self.assertEqual(commands, [])
+        self.assertEqual(codex_commands, ["/model"])
+
+    def test_handle_update_keeps_unknown_non_builtin_slash_command_as_prompt(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        prompts: list[str] = []
+        commands: list[str] = []
+        codex_commands: list[str] = []
+
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming.text)
+
+        def fake_handle_command(incoming: IncomingMessage) -> None:
+            commands.append(incoming.text)
+
+        def fake_handle_codex_command(incoming: IncomingMessage) -> None:
+            codex_commands.append(incoming.text)
+
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+        self.app._handle_command = fake_handle_command  # type: ignore[method-assign]
+        self.app._handle_codex_command = fake_handle_codex_command  # type: ignore[method-assign]
+
+        self.app._handle_update(
+            {
+                "update_id": 4,
+                "message": {
+                    "message_id": 458,
+                    "text": "/not-a-real-codex-command",
+                    "from": {"id": 1},
+                    "chat": {"id": 100},
+                    "message_thread_id": 9,
+                },
+            }
+        )
+
+        self.assertEqual(prompts, ["/not-a-real-codex-command"])
         self.assertEqual(commands, [])
         self.assertEqual(codex_commands, [])
 
