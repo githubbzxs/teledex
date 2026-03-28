@@ -35,7 +35,8 @@ HELP_TEXT = """teledex 可用命令：
 直接发送普通文本，也会继续当前活跃会话。"""
 
 _PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
-_PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
+_PREVIEW_HEARTBEAT_FRAMES = ("○", "◔", "◑", "◕")
+_PREVIEW_COMPLETE_FRAME = "●"
 _PREVIEW_HISTORY_MAX_CHARS = 2000
 _PREVIEW_TOOL_OUTPUT_MAX_CHARS = 2000
 _PREVIEW_OUTPUT_MAX_CHARS = 2200
@@ -246,7 +247,7 @@ class LivePreviewState:
         marker = (
             _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
             if self._in_progress
-            else _PREVIEW_HEARTBEAT_FRAMES[-1]
+            else _PREVIEW_COMPLETE_FRAME
         )
         sections = [
             f"{marker} {self._status_text} ({_format_elapsed_compact(self._elapsed_seconds)})"
@@ -262,7 +263,7 @@ class LivePreviewState:
         marker = (
             _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
             if self._in_progress
-            else _PREVIEW_HEARTBEAT_FRAMES[-1]
+            else _PREVIEW_COMPLETE_FRAME
         )
         sections = [
             html.escape(
@@ -358,14 +359,12 @@ def _truncate_preview_tail(text: str, max_chars: int) -> str:
 
 def _format_elapsed_compact(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
-    if total_seconds < 60:
-        return f"{total_seconds}s"
     if total_seconds < 3600:
-        minutes, secs = divmod(total_seconds, 60)
-        return f"{minutes}m {secs:02d}s"
+        minutes = total_seconds // 60
+        return f"{minutes}m"
     hours, remainder = divmod(total_seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours}h {minutes:02d}m {secs:02d}s"
+    minutes = remainder // 60
+    return f"{hours}h {minutes:02d}m"
 
 
 def _normalize_preview_interval(seconds: float) -> float:
@@ -889,7 +888,7 @@ class TeledexApp:
             self.config.preview_update_interval_seconds
         )
         heartbeat_step_seconds = max(1, int(round(heartbeat_interval)))
-        next_heartbeat_at = time.monotonic()
+        next_heartbeat_at = time.monotonic() + heartbeat_interval
         while not stop_event.is_set():
             now = time.monotonic()
             if now - last_typing_at >= _PREVIEW_TYPING_INTERVAL_SECONDS:

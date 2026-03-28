@@ -10,6 +10,7 @@ from teledex.app import (
     IncomingMessage,
     LivePreviewState,
     TeledexApp,
+    _format_elapsed_compact,
     _next_preview_deadline,
     _normalize_preview_interval,
 )
@@ -93,7 +94,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertEqual(str(calls[0]["text"]), "○ Working (0s)")
+        self.assertEqual(str(calls[0]["text"]), "○ Working (0m)")
 
     def test_send_run_result_never_replies_to_preview_message(self) -> None:
         active_run = ActiveRun(
@@ -283,6 +284,12 @@ class AppMessagingTestCase(unittest.TestCase):
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
+    def test_format_elapsed_compact_uses_minute_granularity(self) -> None:
+        self.assertEqual(_format_elapsed_compact(0), "0m")
+        self.assertEqual(_format_elapsed_compact(59), "0m")
+        self.assertEqual(_format_elapsed_compact(60), "1m")
+        self.assertEqual(_format_elapsed_compact(3660), "1h 01m")
+
     def test_preview_deadline_catches_up_without_accumulating_drift(self) -> None:
         self.assertEqual(_normalize_preview_interval(0.0), 0.2)
         self.assertEqual(_normalize_preview_interval(1.0), 1.0)
@@ -292,13 +299,13 @@ class LivePreviewStateTestCase(unittest.TestCase):
     def test_status_line_tracks_elapsed_with_circle_animation(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.render(), "○ Thinking (0s)")
-        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=1), "● Thinking (1s)")
+        self.assertEqual(preview.render(), "○ Thinking (0m)")
+        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=60), "◔ Thinking (1m)")
 
     def test_status_line_can_catch_up_multiple_elapsed_seconds(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=3), "● Thinking (3s)")
+        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=180), "◕ Thinking (3m)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState()
@@ -306,7 +313,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)\n\nabcdef",
+            "○ Working (0m)\n\nabcdef",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:
@@ -318,7 +325,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)\n\n先看目录\n\n再检查配置",
+            "○ Working (0m)\n\n先看目录\n\n再检查配置",
         )
 
     def test_command_output_is_rendered_in_preview(self) -> None:
@@ -331,7 +338,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)\n\n/bin/bash -lc 'pwd'\nfirst line\nsecond line",
+            "○ Working (0m)\n\n/bin/bash -lc 'pwd'\nfirst line\nsecond line",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -340,7 +347,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.complete(),
-            "● Completed (0s)\n\n完成内容",
+            "● Completed (0m)\n\n完成内容",
         )
 
     def test_commentary_can_be_kept_until_final_answer_starts(self) -> None:
@@ -349,7 +356,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)\n\n**Thinking**\n\nChecking files",
+            "○ Working (0m)\n\n**Thinking**\n\nChecking files",
         )
 
     def test_footer_statusline_renders_at_bottom(self) -> None:
@@ -358,7 +365,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)\n\ngpt-5.4 default · 100% left · ~/teledex",
+            "○ Working (0m)\n\ngpt-5.4 default · 100% left · ~/teledex",
         )
 
     def test_final_stream_clears_transient_sections(self) -> None:
@@ -367,7 +374,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_tool_state("call_1", command_text="cat README.md", output_text="hello")
         preview.update_stream_text("最终输出")
 
-        self.assertEqual(preview.render(), "○ Working (0s)\n\n最终输出")
+        self.assertEqual(preview.render(), "○ Working (0m)\n\n最终输出")
 
     def test_final_html_only_renders_final_answer_markdown(self) -> None:
         preview = LivePreviewState()
@@ -376,7 +383,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         rendered = preview.render_final_html()
 
-        self.assertIn("● Completed (0s)", rendered)
+        self.assertIn("● Completed (0m)", rendered)
         self.assertIn("<b>标题</b>", rendered)
         self.assertIn("• 列表项", rendered)
         self.assertIn("<b>加粗</b>", rendered)
