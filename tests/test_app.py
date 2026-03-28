@@ -10,6 +10,7 @@ from teledex.app import (
     IncomingMessage,
     LivePreviewState,
     TeledexApp,
+    _decorate_codex_prompt,
     _format_elapsed_compact,
     _next_preview_deadline,
     _normalize_preview_interval,
@@ -333,6 +334,13 @@ class AppMessagingTestCase(unittest.TestCase):
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
+    def test_decorate_codex_prompt_keeps_english_titles_and_requests_chinese_body(self) -> None:
+        decorated = _decorate_codex_prompt("帮我检查配置")
+
+        self.assertIn("Thinking、Planning", decorated)
+        self.assertIn("正文说明、过程描述和最终答复都请使用简体中文", decorated)
+        self.assertTrue(decorated.endswith("帮我检查配置"))
+
     def test_format_elapsed_compact_uses_minute_granularity(self) -> None:
         self.assertEqual(_format_elapsed_compact(0), "0m")
         self.assertEqual(_format_elapsed_compact(59), "0m")
