@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-import html
 import logging
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from .codex_runner import CodexProcessHandle, CodexRunner
 from .config import AppConfig
 from .formatting import (
-    extract_first_bold_markdown,
     markdown_to_telegram_html,
     split_markdown_message,
-    strip_citations,
 )
 from .storage import SessionRecord, Storage
 from .telegram_api import (
@@ -37,14 +33,21 @@ HELP_TEXT = """teledex 可用命令：
 除以上管理命令外，其他 `/命令` 会直接作为 Codex 原生命令发送到当前会话。
 直接发送普通文本，也会继续当前活跃会话。"""
 
-_PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
-_PREVIEW_TYPING_INTERVAL_SECONDS = 1.0
-_PREVIEW_STREAM_STEP_CHARS = 1
+_PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
 _PREVIEW_HISTORY_MAX_CHARS = 2000
-_PREVIEW_TOOL_OUTPUT_MAX_CHARS = 600
-_PREVIEW_OUTPUT_MAX_CHARS = 400
-_PREVIEW_STREAM_INTERVAL_SECONDS = 0.04
+_PREVIEW_TOOL_OUTPUT_MAX_CHARS = 2000
+_PREVIEW_OUTPUT_MAX_CHARS = 2200
+_PREVIEW_LOOP_IDLE_SECONDS = 0.1
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
+_BOT_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("start", "查看帮助"),
+    ("tnew", "新建会话"),
+    ("tsessions", "查看会话"),
+    ("tuse", "切换会话"),
+    ("tbind", "绑定目录"),
+    ("tpwd", "当前目录"),
+    ("tstop", "停止任务"),
+)
 
 
 @dataclass(slots=True)
@@ -76,25 +79,20 @@ class LivePreviewState:
         history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
         output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
         tool_output_max_chars: int = _PREVIEW_TOOL_OUTPUT_MAX_CHARS,
-        stream_step_chars: int = _PREVIEW_STREAM_STEP_CHARS,
-        now_func: Callable[[], float] | None = None,
     ) -> None:
         self._status_text = initial_status.strip() or "Working"
         self._target_text = ""
-        self._visible_chars = 0
         self._commentary_order: list[str] = []
         self._commentary_text_by_id: dict[str, str] = {}
+        self._active_tool_call_id: str | None = None
+        self._tool_command_text = ""
         self._tool_output_text = ""
         self._footer_statusline = ""
-        self._frame_index = 0
         self._history_max_chars = max(1, history_max_chars)
         self._output_max_chars = max(1, output_max_chars)
         self._tool_output_max_chars = max(1, tool_output_max_chars)
-        self._stream_step_chars = max(1, stream_step_chars)
         self._in_progress = True
         self._flush_requested = False
-        self._now_func = now_func or time.monotonic
-        self._started_at = self._now_func()
         self._lock = threading.RLock()
 
     def update_status(self, text: str) -> None:
@@ -108,19 +106,23 @@ class LivePreviewState:
             self._flush_requested = True
 
     def update_stream_text(self, text: str) -> None:
-        normalized = strip_citations(text).strip()
+        normalized = text.replace("\r\n", "\n").rstrip()
         if not normalized:
             return
         with self._lock:
-            if normalized == self._target_text and self._visible_chars == len(self._target_text):
+            if normalized == self._target_text:
                 return
             self._target_text = normalized
-            self._visible_chars = len(self._target_text)
+            self._commentary_order.clear()
+            self._commentary_text_by_id.clear()
+            self._active_tool_call_id = None
+            self._tool_command_text = ""
+            self._tool_output_text = ""
             self._in_progress = True
             self._flush_requested = True
 
     def update_commentary(self, item_id: str, text: str) -> None:
-        normalized = strip_citations(text).strip()
+        normalized = text.replace("\r\n", "\n").rstrip()
         normalized_id = item_id.strip()
         if not normalized or not normalized_id:
             return
@@ -131,21 +133,56 @@ class LivePreviewState:
             if previous == normalized:
                 return
             self._commentary_text_by_id[normalized_id] = normalized
-            if normalized_id.startswith("reasoning:"):
-                header = extract_first_bold_markdown(normalized)
-                if header:
-                    self._status_text = header
             self._in_progress = True
             self._flush_requested = True
 
-    def update_tool_output(self, text: str) -> None:
-        normalized = text.replace("\r\n", "\n").strip()
-        if not normalized:
+    def clear_commentary(self, item_id: str) -> None:
+        normalized_id = item_id.strip()
+        if not normalized_id:
             return
         with self._lock:
-            if normalized == self._tool_output_text:
+            if normalized_id not in self._commentary_text_by_id:
                 return
-            self._tool_output_text = normalized
+            self._commentary_text_by_id.pop(normalized_id, None)
+            self._commentary_order = [
+                current_id
+                for current_id in self._commentary_order
+                if current_id != normalized_id
+            ]
+            if (
+                not self._commentary_order
+                and not self._target_text
+                and not self._tool_command_text
+                and not self._tool_output_text
+                and self._status_text == "Thinking"
+            ):
+                self._status_text = "Working"
+            self._flush_requested = True
+
+    def update_tool_state(
+        self,
+        item_id: str | None,
+        command_text: str | None = None,
+        output_text: str | None = None,
+    ) -> None:
+        normalized_command = (command_text or "").strip()
+        normalized_output = (output_text or "").replace("\r\n", "\n").rstrip()
+        if not item_id and not normalized_command and not normalized_output:
+            return
+        with self._lock:
+            if item_id and item_id != self._active_tool_call_id:
+                self._active_tool_call_id = item_id
+                self._tool_command_text = ""
+                self._tool_output_text = ""
+            changed = False
+            if normalized_command and normalized_command != self._tool_command_text:
+                self._tool_command_text = normalized_command
+                changed = True
+            if normalized_output and normalized_output != self._tool_output_text:
+                self._tool_output_text = normalized_output
+                changed = True
+            if not changed:
+                return
             self._in_progress = True
             self._flush_requested = True
 
@@ -161,22 +198,11 @@ class LivePreviewState:
 
     def advance(self) -> str:
         with self._lock:
-            if self._in_progress:
-                self._frame_index = (self._frame_index + 1) % len(_PREVIEW_HEARTBEAT_FRAMES)
-            if self._target_text and self._visible_chars < len(self._target_text):
-                self._visible_chars = min(
-                    len(self._target_text),
-                    self._visible_chars + self._stream_step_chars,
-                )
             return self._render_locked()
 
     def render(self) -> str:
         with self._lock:
             return self._render_locked()
-
-    def render_html(self) -> str:
-        with self._lock:
-            return self._render_html_locked()
 
     def has_pending_stream(self) -> bool:
         with self._lock:
@@ -192,24 +218,21 @@ class LivePreviewState:
 
     def finish(self, status_text: str) -> str:
         with self._lock:
-            self._visible_chars = len(self._target_text)
             self._status_text = status_text.strip() or self._status_text
+            self._commentary_order.clear()
+            self._commentary_text_by_id.clear()
+            self._active_tool_call_id = None
+            self._tool_command_text = ""
+            self._tool_output_text = ""
             self._in_progress = False
-            self._flush_requested = False
+            self._flush_requested = True
             return self._render_locked()
 
     def complete(self) -> str:
         return self.finish("Completed")
 
     def _render_locked(self) -> str:
-        marker = (
-            _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
-            if self._in_progress
-            else _PREVIEW_HEARTBEAT_FRAMES[-1]
-        )
-        sections = [
-            f"{marker} {self._status_text} ({_format_elapsed_compact(self._now_func() - self._started_at)})"
-        ]
+        sections = [self._status_text]
         body = self._build_body_locked()
         if body:
             sections.extend(["", body])
@@ -217,80 +240,22 @@ class LivePreviewState:
             sections.extend(["", self._footer_statusline])
         return "\n".join(sections).strip()
 
-    def _render_html_locked(self) -> str:
-        marker = (
-            _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
-            if self._in_progress
-            else _PREVIEW_HEARTBEAT_FRAMES[-1]
-        )
-        sections = [
-            html.escape(
-                f"{marker} {self._status_text} ({_format_elapsed_compact(self._now_func() - self._started_at)})"
-            )
-        ]
-
-        commentary = self._render_commentary_locked()
-        if commentary:
-            sections.extend(
-                [
-                    "",
-                    "<b>Thoughts</b>",
-                    markdown_to_telegram_html(commentary) or html.escape(commentary),
-                ]
-            )
-
-        tool_output = _truncate_preview_tail(
-            self._tool_output_text,
-            self._tool_output_max_chars,
-        )
-        if tool_output:
-            rendered_tool_output = html.escape(tool_output)
-            if rendered_tool_output:
-                rendered_tool_output += "\n"
-            sections.extend(
-                [
-                    "",
-                    "<b>Tool output</b>",
-                    f"<pre><code>{rendered_tool_output}</code></pre>",
-                ]
-            )
-
-        output_text = _truncate_preview_text(
-            self._target_text[: self._visible_chars],
-            self._output_max_chars,
-        )
-        if output_text:
-            sections.extend(
-                [
-                    "",
-                    "<b>Output preview</b>",
-                    markdown_to_telegram_html(output_text) or html.escape(output_text),
-                ]
-            )
-
-        if self._footer_statusline:
-            sections.extend(["", html.escape(self._footer_statusline)])
-        return "\n".join(section for section in sections if section is not None).strip()
-
     def _build_body_locked(self) -> str:
         sections: list[str] = []
         commentary = self._render_commentary_locked()
         if commentary:
-            sections.append(f"Thoughts\n{commentary}")
+            sections.append(commentary)
 
-        tool_output = _truncate_preview_tail(
-            self._tool_output_text,
-            self._tool_output_max_chars,
-        )
-        if tool_output:
-            sections.append(f"Tool output\n{tool_output}")
+        tool_block = self._render_tool_block_locked()
+        if tool_block:
+            sections.append(tool_block)
 
         output_text = _truncate_preview_text(
-            self._target_text[: self._visible_chars],
+            self._target_text,
             self._output_max_chars,
         )
         if output_text:
-            sections.append(f"Output preview\n{output_text}")
+            sections.append(output_text)
 
         return "\n\n".join(section for section in sections if section).strip()
 
@@ -303,6 +268,14 @@ class LivePreviewState:
             if self._commentary_text_by_id.get(item_id)
         ]
         return _truncate_preview_middle("\n\n".join(entries), self._history_max_chars)
+
+    def _render_tool_block_locked(self) -> str:
+        output_text = _truncate_preview_tail(
+            self._tool_output_text,
+            self._tool_output_max_chars,
+        )
+        parts = [part for part in (self._tool_command_text, output_text) if part]
+        return "\n".join(parts).strip()
 
 
 def _truncate_preview_text(text: str, max_chars: int) -> str:
@@ -330,35 +303,6 @@ def _truncate_preview_tail(text: str, max_chars: int) -> str:
     if max_chars <= 4:
         return text[-max_chars:]
     return "...\n" + text[-(max_chars - 4) :].lstrip()
-
-
-def _format_elapsed_compact(seconds: float) -> str:
-    total_seconds = max(0, int(seconds))
-    if total_seconds < 60:
-        return f"{total_seconds}s"
-    if total_seconds < 3600:
-        minutes, secs = divmod(total_seconds, 60)
-        return f"{minutes}m {secs:02d}s"
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours}h {minutes:02d}m {secs:02d}s"
-
-
-def _normalize_preview_interval(seconds: float) -> float:
-    return max(0.2, float(seconds))
-
-
-def _next_preview_deadline(
-    previous_deadline: float,
-    now: float,
-    interval_seconds: float,
-) -> float:
-    deadline = previous_deadline
-    if deadline <= 0:
-        deadline = now + interval_seconds
-    while deadline <= now:
-        deadline += interval_seconds
-    return deadline
 
 
 class TeledexApp:
@@ -390,6 +334,7 @@ class TeledexApp:
     def run_forever(self) -> None:
         bot = self.telegram.get_me()
         self.logger.info("Telegram bot 已连接: @%s", bot.get("username", "unknown"))
+        self._sync_bot_commands()
         while True:
             try:
                 updates = self.telegram.get_updates(
@@ -745,8 +690,14 @@ class TeledexApp:
                         parsed.commentary_id,
                         parsed.commentary_text,
                     )
-                if parsed.tool_output_text:
-                    preview_state.update_tool_output(parsed.tool_output_text)
+                if parsed.commentary_completed_id:
+                    preview_state.clear_commentary(parsed.commentary_completed_id)
+                if parsed.tool_call_id or parsed.tool_command_text or parsed.tool_output_text:
+                    preview_state.update_tool_state(
+                        parsed.tool_call_id,
+                        command_text=parsed.tool_command_text,
+                        output_text=parsed.tool_output_text,
+                    )
                 if parsed.footer_statusline:
                     preview_state.update_footer_statusline(parsed.footer_statusline)
                 if parsed.preview_text:
@@ -769,7 +720,6 @@ class TeledexApp:
             if not final_message:
                 final_message = "Completed, but no final response was captured."
 
-            final_message = strip_citations(final_message)
             preview_state.update_stream_text(final_message)
             preview_state.update_status("Working")
             self._stop_preview_loop(preview_stop_event, preview_worker)
@@ -857,10 +807,6 @@ class TeledexApp:
     ) -> None:
         last_preview_text = ""
         last_typing_at = 0.0
-        heartbeat_interval = _normalize_preview_interval(
-            self.config.preview_update_interval_seconds
-        )
-        next_heartbeat_at = time.monotonic()
         while not stop_event.is_set():
             now = time.monotonic()
             if now - last_typing_at >= _PREVIEW_TYPING_INTERVAL_SECONDS:
@@ -871,33 +817,15 @@ class TeledexApp:
                 )
                 last_typing_at = now
 
-            text = preview_state.advance()
-            if text and text != last_preview_text:
-                rendered_html = preview_state.render_html()
-                if rendered_html and self._edit_preview_message(
-                    active_run,
-                    rendered_html,
-                    parse_mode="HTML",
-                ):
+            if preview_state.has_pending_stream():
+                text = preview_state.render()
+                if text and text != last_preview_text:
+                    self._update_preview(active_run, text, prefer_html=False)
                     last_preview_text = text
                     preview_state.mark_rendered()
                     continue
-                self._update_preview(active_run, text, prefer_html=False)
-                last_preview_text = text
-                preview_state.mark_rendered()
 
-            wait_seconds = (
-                _PREVIEW_STREAM_INTERVAL_SECONDS if preview_state.has_pending_stream() else 0.0
-            )
-            if wait_seconds <= 0:
-                now = time.monotonic()
-                next_heartbeat_at = _next_preview_deadline(
-                    next_heartbeat_at,
-                    now,
-                    heartbeat_interval,
-                )
-                wait_seconds = max(0.0, next_heartbeat_at - now)
-            stop_event.wait(wait_seconds)
+            stop_event.wait(_PREVIEW_LOOP_IDLE_SECONDS)
 
     def _stop_preview_loop(
         self,
@@ -915,19 +843,10 @@ class TeledexApp:
     ) -> None:
         deadline = time.monotonic() + _PREVIEW_DRAIN_TIMEOUT_SECONDS
         while preview_state.has_pending_stream() and time.monotonic() < deadline:
-            text = preview_state.advance()
-            rendered_html = preview_state.render_html()
-            if rendered_html and self._edit_preview_message(
-                active_run,
-                rendered_html,
-                parse_mode="HTML",
-            ):
-                preview_state.mark_rendered()
-                time.sleep(_PREVIEW_STREAM_INTERVAL_SECONDS)
-                continue
+            text = preview_state.render()
             self._update_preview(active_run, text, prefer_html=False)
             preview_state.mark_rendered()
-            time.sleep(_PREVIEW_STREAM_INTERVAL_SECONDS)
+            time.sleep(_PREVIEW_LOOP_IDLE_SECONDS)
 
     def _update_preview(
         self,
@@ -974,13 +893,6 @@ class TeledexApp:
         active_run: ActiveRun,
         preview_state: LivePreviewState,
     ) -> bool:
-        rendered_html = preview_state.render_html()
-        if rendered_html and self._edit_preview_message(
-            active_run,
-            rendered_html,
-            parse_mode="HTML",
-        ):
-            return True
         return self._edit_preview_message(active_run, preview_state.render())
 
     def _send_run_result(
@@ -1005,19 +917,20 @@ class TeledexApp:
         )
 
     def _build_inline_result(self, text: str) -> tuple[str, str | None]:
-        cleaned = strip_citations(text).strip()
-        final_markdown = f"**● Completed** {cleaned}" if cleaned else "**● Completed**"
-        html_text = markdown_to_telegram_html(final_markdown)
-        if html_text and len(html_text) <= 3500:
-            return html_text, "HTML"
-
         plain_limit = 3400
-        plain_text = f"● Completed {cleaned}" if cleaned else "● Completed"
+        cleaned = text.strip()
+        plain_text = f"Completed\n\n{cleaned}" if cleaned else "Completed"
         if len(plain_text) <= plain_limit:
             return plain_text, None
         suffix = "\n\n[Truncated for length]"
         truncated = plain_text[: plain_limit - len(suffix) - 3].rstrip() + "..." + suffix
         return truncated, None
+
+    def _sync_bot_commands(self) -> None:
+        try:
+            self.telegram.set_my_commands(_BOT_COMMANDS)
+        except TelegramApiError:
+            self.logger.warning("同步 Telegram slash 命令失败", exc_info=True)
 
     def _safe_send_chat_action(
         self,

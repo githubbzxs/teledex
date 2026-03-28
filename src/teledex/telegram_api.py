@@ -101,6 +101,24 @@ class TelegramClient:
             payload["message_thread_id"] = message_thread_id
         self._call("sendChatAction", payload)
 
+    def set_my_commands(
+        self,
+        commands: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    ) -> None:
+        payload = {
+            "commands": json.dumps(
+                [
+                    {
+                        "command": command,
+                        "description": description,
+                    }
+                    for command, description in commands
+                ],
+                ensure_ascii=False,
+            )
+        }
+        self._call("setMyCommands", payload)
+
     def _call(
         self, method: str, payload: dict[str, Any] | None = None, timeout: int | None = None
     ) -> Any:

@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import AppConfig
-from .formatting import extract_first_bold_markdown
 
 
 @dataclass(slots=True)
@@ -38,6 +37,9 @@ class ParsedCodexEvent:
     preview_text: str | None = None
     commentary_id: str | None = None
     commentary_text: str | None = None
+    commentary_completed_id: str | None = None
+    tool_call_id: str | None = None
+    tool_command_text: str | None = None
     tool_output_text: str | None = None
     thread_id: str | None = None
     final_message: str | None = None
@@ -198,7 +200,7 @@ class CodexRunner:
             return _with_footer(ParsedCodexEvent(status_text=message or None))
         if event_type == "plan.updated":
             plan_id = str(payload.get("plan_id") or "").strip()
-            text = str(payload.get("text") or "").strip()
+            text = str(payload.get("text") or "").rstrip()
             if not plan_id or not text:
                 return ParsedCodexEvent(footer_statusline=footer_statusline)
             return _with_footer(
@@ -210,23 +212,25 @@ class CodexRunner:
             )
         if event_type == "reasoning.updated":
             item_id = str(payload.get("item_id") or "").strip()
-            text = str(payload.get("text") or "").strip()
+            text = str(payload.get("text") or "").rstrip()
             if not item_id or not text:
                 return ParsedCodexEvent(footer_statusline=footer_statusline)
             return _with_footer(
                 ParsedCodexEvent(
-                    status_text=extract_first_bold_markdown(text) or None,
+                    status_text="Thinking",
                     commentary_id=f"reasoning:{item_id}",
                     commentary_text=text,
                 )
             )
         if event_type == "command.output":
-            text = str(payload.get("text") or "").strip()
+            text = str(payload.get("text") or "").rstrip()
+            item_id = str(payload.get("item_id") or "").strip() or None
             if not text:
                 return _with_footer(ParsedCodexEvent(status_text="Working"))
             return _with_footer(
                 ParsedCodexEvent(
                     status_text="Working",
+                    tool_call_id=item_id,
                     tool_output_text=text,
                 )
             )
@@ -237,15 +241,18 @@ class CodexRunner:
         if isinstance(item, dict):
             item_type = str(item.get("type", ""))
             if item_type == "agent_message":
-                text = str(item.get("text", "")).strip()
+                text = str(item.get("text", "")).rstrip()
                 item_id = str(item.get("id", "")).strip() or None
                 phase = str(item.get("phase", "")).strip()
                 if phase == "commentary":
                     return _with_footer(
                         ParsedCodexEvent(
-                            status_text=None,
+                            status_text="Thinking" if text else None,
                             commentary_id=item_id,
                             commentary_text=text or None,
+                            commentary_completed_id=(
+                                item_id if event_type == "item.completed" and item_id else None
+                            ),
                         )
                     )
                 return _with_footer(
@@ -256,14 +263,19 @@ class CodexRunner:
                     )
                 )
             if item_type == "plan":
-                text = str(item.get("text", "")).strip()
+                text = str(item.get("text", "")).rstrip()
                 item_id = str(item.get("id", "")).strip() or "plan"
                 if text:
                     return _with_footer(
                         ParsedCodexEvent(
-                            status_text="Working",
+                            status_text="Thinking",
                             commentary_id=f"plan:{item_id}",
                             commentary_text=text,
+                            commentary_completed_id=(
+                                f"plan:{item_id}"
+                                if event_type == "item.completed"
+                                else None
+                            ),
                         )
                     )
                 return _with_footer(ParsedCodexEvent(status_text="Working"))
@@ -273,31 +285,44 @@ class CodexRunner:
                     parts = []
                     for section in summary:
                         if isinstance(section, dict):
-                            text = str(section.get("text") or "").strip()
+                            text = str(section.get("text") or "").rstrip()
                             if text:
                                 parts.append(text)
-                    summary_text = "\n\n".join(parts).strip()
+                    summary_text = "\n\n".join(parts).rstrip()
                     if summary_text:
                         item_id = str(item.get("id", "")).strip() or "reasoning"
                         return _with_footer(
                             ParsedCodexEvent(
-                                status_text=extract_first_bold_markdown(summary_text) or None,
+                                status_text="Thinking",
                                 commentary_id=f"reasoning:{item_id}",
                                 commentary_text=summary_text,
+                                commentary_completed_id=(
+                                    f"reasoning:{item_id}"
+                                    if event_type == "item.completed"
+                                    else None
+                                ),
                             )
                         )
+                if event_type == "item.completed":
+                    item_id = str(item.get("id", "")).strip() or "reasoning"
+                    return _with_footer(
+                        ParsedCodexEvent(
+                            commentary_completed_id=f"reasoning:{item_id}",
+                        )
+                    )
             if item_type == "command_execution":
+                item_id = str(item.get("id", "")).strip() or None
                 command = str(item.get("command", "")).strip()
-                aggregated_output = str(item.get("aggregatedOutput") or "").strip()
-                if aggregated_output:
+                aggregated_output = str(item.get("aggregatedOutput") or "").rstrip()
+                if aggregated_output or command:
                     return _with_footer(
                         ParsedCodexEvent(
                             status_text="Working",
-                            tool_output_text=aggregated_output,
+                            tool_call_id=item_id,
+                            tool_command_text=command or None,
+                            tool_output_text=aggregated_output or None,
                         )
                     )
-                if command:
-                    return _with_footer(ParsedCodexEvent(status_text="Working"))
                 return _with_footer(ParsedCodexEvent(status_text="Working"))
             if "tool" in item_type or item_type in {"shell_call", "function_call"}:
                 return _with_footer(ParsedCodexEvent(status_text="Working"))
@@ -308,7 +333,7 @@ class CodexRunner:
     def read_output_file(self, output_file: Path) -> str | None:
         if not output_file.exists():
             return None
-        text = output_file.read_text(encoding="utf-8", errors="replace").strip()
+        text = output_file.read_text(encoding="utf-8", errors="replace").rstrip()
         return text or None
 
     def tail_event_log(self, event_log_file: Path, max_lines: int = 20) -> str | None:

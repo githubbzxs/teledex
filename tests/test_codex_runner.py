@@ -66,10 +66,28 @@ class CodexRunnerTestCase(unittest.TestCase):
             )
         )
 
-        self.assertIsNone(parsed.status_text)
+        self.assertEqual(parsed.status_text, "Thinking")
         self.assertEqual(parsed.commentary_id, "msg_1")
         self.assertEqual(parsed.commentary_text, "我先检查目录")
         self.assertIsNone(parsed.final_message)
+
+    def test_parse_event_line_marks_completed_commentary_for_cleanup(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "id": "msg_1",
+                        "phase": "commentary",
+                        "text": "我先检查目录",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.commentary_completed_id, "msg_1")
 
     def test_parse_event_line_supports_turn_failed(self) -> None:
         parsed = self.runner.parse_event_line(
@@ -113,7 +131,27 @@ class CodexRunnerTestCase(unittest.TestCase):
         )
 
         self.assertEqual(parsed.status_text, "Working")
+        self.assertEqual(parsed.tool_call_id, "cmd_1")
         self.assertEqual(parsed.tool_output_text, "line1\nline2")
+
+    def test_parse_event_line_supports_command_execution_metadata(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {
+                        "type": "command_execution",
+                        "id": "call_1",
+                        "command": "/bin/bash -lc 'pwd'",
+                        "aggregatedOutput": "",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.tool_call_id, "call_1")
+        self.assertEqual(parsed.tool_command_text, "/bin/bash -lc 'pwd'")
 
     def test_parse_event_line_only_marks_final_message_on_completed_agent_message(self) -> None:
         parsed = self.runner.parse_event_line(

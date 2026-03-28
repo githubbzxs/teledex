@@ -10,8 +10,6 @@ from teledex.app import (
     IncomingMessage,
     LivePreviewState,
     TeledexApp,
-    _next_preview_deadline,
-    _normalize_preview_interval,
 )
 from teledex.config import AppConfig
 from teledex.telegram_api import TelegramMessage
@@ -93,7 +91,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertTrue(str(calls[0]["text"]).startswith("○ Working (0s)"))
+        self.assertEqual(str(calls[0]["text"]), "Working")
 
     def test_send_run_result_never_replies_to_preview_message(self) -> None:
         active_run = ActiveRun(
@@ -126,9 +124,9 @@ class AppMessagingTestCase(unittest.TestCase):
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(len(calls), 1)
-        self.assertIn("● Completed", str(calls[0]["text"]))
+        self.assertIn("Completed", str(calls[0]["text"]))
         self.assertIn("最终回复", str(calls[0]["text"]))
-        self.assertEqual(calls[0]["parse_mode"], "HTML")
+        self.assertIsNone(calls[0]["parse_mode"])
 
     def test_send_run_result_keeps_footer_statusline_when_preview_state_is_present(self) -> None:
         active_run = ActiveRun(
@@ -163,10 +161,34 @@ class AppMessagingTestCase(unittest.TestCase):
         self.app._send_run_result(active_run, "最终回复", preview)
 
         self.assertEqual(len(calls), 1)
-        self.assertIn("● Completed", str(calls[0]["text"]))
+        self.assertIn("Completed", str(calls[0]["text"]))
         self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertIn("gpt-5.4 default · 98% left · ~/teledex", str(calls[0]["text"]))
-        self.assertEqual(calls[0]["parse_mode"], "HTML")
+        self.assertIsNone(calls[0]["parse_mode"])
+
+    def test_sync_bot_commands_registers_management_commands(self) -> None:
+        commands: list[tuple[tuple[str, str], ...]] = []
+
+        def fake_set_my_commands(values: tuple[tuple[str, str], ...]) -> None:
+            commands.append(values)
+
+        self.app.telegram.set_my_commands = fake_set_my_commands  # type: ignore[method-assign]
+
+        self.app._sync_bot_commands()
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(
+            commands[0],
+            (
+                ("start", "查看帮助"),
+                ("tnew", "新建会话"),
+                ("tsessions", "查看会话"),
+                ("tuse", "切换会话"),
+                ("tbind", "绑定目录"),
+                ("tpwd", "当前目录"),
+                ("tstop", "停止任务"),
+            ),
+        )
 
     def test_handle_update_treats_double_slash_as_codex_prompt(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -260,73 +282,63 @@ class AppMessagingTestCase(unittest.TestCase):
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
-    def test_preview_deadline_catches_up_without_accumulating_drift(self) -> None:
-        self.assertEqual(_normalize_preview_interval(0.0), 0.2)
-        self.assertEqual(_normalize_preview_interval(1.0), 1.0)
-        self.assertEqual(_next_preview_deadline(10.0, 10.2, 1.0), 11.0)
-        self.assertEqual(_next_preview_deadline(10.0, 12.3, 1.0), 13.0)
+    def test_status_line_does_not_include_elapsed_clock(self) -> None:
+        preview = LivePreviewState(initial_status="Thinking")
 
-    def test_status_line_tracks_elapsed_with_heartbeat_marker(self) -> None:
-        now = [0.0]
-        preview = LivePreviewState(initial_status="Thinking", now_func=lambda: now[0])
-
-        self.assertEqual(preview.render(), "○ Thinking (0s)")
-        now[0] = 5.0
-        self.assertEqual(preview.advance(), "● Thinking (5s)")
+        self.assertEqual(preview.render(), "Thinking")
+        self.assertEqual(preview.advance(), "Thinking")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
-        preview = LivePreviewState(stream_step_chars=2)
+        preview = LivePreviewState()
         preview.update_stream_text("abcdef")
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)\n\nOutput preview\nabcdef",
-        )
-        self.assertEqual(
-            preview.advance(),
-            "● Working (0s)\n\nOutput preview\nabcdef",
+            "Working\n\nabcdef",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:
-        now = [0.0]
-        preview = LivePreviewState(now_func=lambda: now[0])
+        preview = LivePreviewState()
 
         preview.update_commentary("msg_1", "先看目录")
         preview.update_commentary("msg_2", "再检查配置")
-        now[0] = 5.0
         preview.update_status("Working")
 
         self.assertEqual(
             preview.render(),
-            "○ Working (5s)\n\nThoughts\n先看目录\n\n再检查配置",
+            "Working\n\n先看目录\n\n再检查配置",
         )
 
-    def test_tool_output_is_rendered_in_preview(self) -> None:
+    def test_command_output_is_rendered_in_preview(self) -> None:
         preview = LivePreviewState()
-        preview.update_tool_output("first line\nsecond line")
+        preview.update_tool_state(
+            "call_1",
+            command_text="/bin/bash -lc 'pwd'",
+            output_text="first line\nsecond line",
+        )
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)\n\nTool output\nfirst line\nsecond line",
+            "Working\n\n/bin/bash -lc 'pwd'\nfirst line\nsecond line",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
-        preview = LivePreviewState(stream_step_chars=2)
+        preview = LivePreviewState()
         preview.update_stream_text("完成内容")
 
         self.assertEqual(
             preview.complete(),
-            "● Completed (0s)\n\nOutput preview\n完成内容",
+            "Completed\n\n完成内容",
         )
 
-    def test_reasoning_commentary_promotes_bold_heading_to_status_line(self) -> None:
+    def test_commentary_completion_removes_transient_text(self) -> None:
         preview = LivePreviewState()
-
         preview.update_commentary("reasoning:item_1", "**Thinking**\n\nChecking files")
+        preview.clear_commentary("reasoning:item_1")
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\nThoughts\n**Thinking**\n\nChecking files",
+            "Working",
         )
 
     def test_footer_statusline_renders_at_bottom(self) -> None:
@@ -335,22 +347,16 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0s)\n\ngpt-5.4 default · 100% left · ~/teledex",
+            "Working\n\ngpt-5.4 default · 100% left · ~/teledex",
         )
 
-    def test_render_html_preserves_markdown_in_output_preview(self) -> None:
+    def test_final_stream_clears_transient_sections(self) -> None:
         preview = LivePreviewState()
-        preview.update_stream_text("## 标题\n\n- 列表项\n\n**加粗**")
-        preview.update_footer_statusline("gpt-5.4 default · 100% left · ~/teledex")
+        preview.update_commentary("msg_1", "先检查 README")
+        preview.update_tool_state("call_1", command_text="cat README.md", output_text="hello")
+        preview.update_stream_text("最终输出")
 
-        rendered = preview.render_html()
-
-        self.assertIn("○ Working (0s)", rendered)
-        self.assertIn("<b>Output preview</b>", rendered)
-        self.assertIn("<b>标题</b>", rendered)
-        self.assertIn("• 列表项", rendered)
-        self.assertIn("<b>加粗</b>", rendered)
-        self.assertIn("gpt-5.4 default · 100% left · ~/teledex", rendered)
+        self.assertEqual(preview.render(), "Working\n\n最终输出")
 
 
 if __name__ == "__main__":
