@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .codex_runner import CodexProcessHandle, CodexRunner
 from .config import AppConfig
@@ -34,6 +35,7 @@ HELP_TEXT = """teledex 可用命令：
 直接发送普通文本，也会继续当前活跃会话。"""
 
 _PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
+_PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_HISTORY_MAX_CHARS = 2000
 _PREVIEW_TOOL_OUTPUT_MAX_CHARS = 2000
 _PREVIEW_OUTPUT_MAX_CHARS = 2200
@@ -79,6 +81,7 @@ class LivePreviewState:
         history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
         output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
         tool_output_max_chars: int = _PREVIEW_TOOL_OUTPUT_MAX_CHARS,
+        now_func: Callable[[], float] | None = None,
     ) -> None:
         self._status_text = initial_status.strip() or "Working"
         self._target_text = ""
@@ -88,11 +91,15 @@ class LivePreviewState:
         self._tool_command_text = ""
         self._tool_output_text = ""
         self._footer_statusline = ""
+        self._frame_index = 0
         self._history_max_chars = max(1, history_max_chars)
         self._output_max_chars = max(1, output_max_chars)
         self._tool_output_max_chars = max(1, tool_output_max_chars)
         self._in_progress = True
         self._flush_requested = False
+        self._now_func = now_func or time.monotonic
+        self._started_at = self._now_func()
+        self._finished_at: float | None = None
         self._lock = threading.RLock()
 
     def update_status(self, text: str) -> None:
@@ -196,8 +203,10 @@ class LivePreviewState:
             self._footer_statusline = normalized
             self._flush_requested = True
 
-    def advance(self) -> str:
+    def advance(self, animate: bool = False) -> str:
         with self._lock:
+            if animate and self._in_progress:
+                self._frame_index = (self._frame_index + 1) % len(_PREVIEW_HEARTBEAT_FRAMES)
             return self._render_locked()
 
     def render(self) -> str:
@@ -225,6 +234,7 @@ class LivePreviewState:
             self._tool_command_text = ""
             self._tool_output_text = ""
             self._in_progress = False
+            self._finished_at = self._now_func()
             self._flush_requested = True
             return self._render_locked()
 
@@ -232,7 +242,15 @@ class LivePreviewState:
         return self.finish("Completed")
 
     def _render_locked(self) -> str:
-        sections = [self._status_text]
+        elapsed_at = self._finished_at if self._finished_at is not None else self._now_func()
+        marker = (
+            _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
+            if self._in_progress
+            else _PREVIEW_HEARTBEAT_FRAMES[-1]
+        )
+        sections = [
+            f"{marker} {self._status_text} ({_format_elapsed_compact(elapsed_at - self._started_at)})"
+        ]
         body = self._build_body_locked()
         if body:
             sections.extend(["", body])
@@ -303,6 +321,35 @@ def _truncate_preview_tail(text: str, max_chars: int) -> str:
     if max_chars <= 4:
         return text[-max_chars:]
     return "...\n" + text[-(max_chars - 4) :].lstrip()
+
+
+def _format_elapsed_compact(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    if total_seconds < 3600:
+        minutes, secs = divmod(total_seconds, 60)
+        return f"{minutes}m {secs:02d}s"
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}h {minutes:02d}m {secs:02d}s"
+
+
+def _normalize_preview_interval(seconds: float) -> float:
+    return max(0.2, float(seconds))
+
+
+def _next_preview_deadline(
+    previous_deadline: float,
+    now: float,
+    interval_seconds: float,
+) -> float:
+    deadline = previous_deadline
+    if deadline <= 0:
+        deadline = now + interval_seconds
+    while deadline <= now:
+        deadline += interval_seconds
+    return deadline
 
 
 class TeledexApp:
@@ -807,6 +854,10 @@ class TeledexApp:
     ) -> None:
         last_preview_text = ""
         last_typing_at = 0.0
+        heartbeat_interval = _normalize_preview_interval(
+            self.config.preview_update_interval_seconds
+        )
+        next_heartbeat_at = time.monotonic()
         while not stop_event.is_set():
             now = time.monotonic()
             if now - last_typing_at >= _PREVIEW_TYPING_INTERVAL_SECONDS:
@@ -818,14 +869,27 @@ class TeledexApp:
                 last_typing_at = now
 
             if preview_state.has_pending_stream():
-                text = preview_state.render()
+                text = preview_state.advance(animate=False)
                 if text and text != last_preview_text:
                     self._update_preview(active_run, text, prefer_html=False)
                     last_preview_text = text
                     preview_state.mark_rendered()
                     continue
 
-            stop_event.wait(_PREVIEW_LOOP_IDLE_SECONDS)
+            now = time.monotonic()
+            next_heartbeat_at = _next_preview_deadline(
+                next_heartbeat_at,
+                now,
+                heartbeat_interval,
+            )
+            wait_seconds = max(0.0, next_heartbeat_at - now)
+            if stop_event.wait(wait_seconds):
+                break
+
+            text = preview_state.advance(animate=True)
+            if text and text != last_preview_text:
+                self._update_preview(active_run, text, prefer_html=False)
+                last_preview_text = text
 
     def _stop_preview_loop(
         self,
@@ -843,7 +907,7 @@ class TeledexApp:
     ) -> None:
         deadline = time.monotonic() + _PREVIEW_DRAIN_TIMEOUT_SECONDS
         while preview_state.has_pending_stream() and time.monotonic() < deadline:
-            text = preview_state.render()
+            text = preview_state.advance(animate=False)
             self._update_preview(active_run, text, prefer_html=False)
             preview_state.mark_rendered()
             time.sleep(_PREVIEW_LOOP_IDLE_SECONDS)

@@ -10,6 +10,8 @@ from teledex.app import (
     IncomingMessage,
     LivePreviewState,
     TeledexApp,
+    _next_preview_deadline,
+    _normalize_preview_interval,
 )
 from teledex.config import AppConfig
 from teledex.telegram_api import TelegramMessage
@@ -91,7 +93,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertEqual(str(calls[0]["text"]), "Working")
+        self.assertEqual(str(calls[0]["text"]), "○ Working (0s)")
 
     def test_send_run_result_never_replies_to_preview_message(self) -> None:
         active_run = ActiveRun(
@@ -282,11 +284,19 @@ class AppMessagingTestCase(unittest.TestCase):
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
-    def test_status_line_does_not_include_elapsed_clock(self) -> None:
-        preview = LivePreviewState(initial_status="Thinking")
+    def test_preview_deadline_catches_up_without_accumulating_drift(self) -> None:
+        self.assertEqual(_normalize_preview_interval(0.0), 0.2)
+        self.assertEqual(_normalize_preview_interval(1.0), 1.0)
+        self.assertEqual(_next_preview_deadline(10.0, 10.2, 1.0), 11.0)
+        self.assertEqual(_next_preview_deadline(10.0, 12.3, 1.0), 13.0)
 
-        self.assertEqual(preview.render(), "Thinking")
-        self.assertEqual(preview.advance(), "Thinking")
+    def test_status_line_tracks_elapsed_with_circle_animation(self) -> None:
+        now = [0.0]
+        preview = LivePreviewState(initial_status="Thinking", now_func=lambda: now[0])
+
+        self.assertEqual(preview.render(), "○ Thinking (0s)")
+        now[0] = 1.0
+        self.assertEqual(preview.advance(animate=True), "● Thinking (1s)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState()
@@ -294,7 +304,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "Working\n\nabcdef",
+            "○ Working (0s)\n\nabcdef",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:
@@ -306,7 +316,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "Working\n\n先看目录\n\n再检查配置",
+            "○ Working (0s)\n\n先看目录\n\n再检查配置",
         )
 
     def test_command_output_is_rendered_in_preview(self) -> None:
@@ -319,7 +329,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "Working\n\n/bin/bash -lc 'pwd'\nfirst line\nsecond line",
+            "○ Working (0s)\n\n/bin/bash -lc 'pwd'\nfirst line\nsecond line",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -328,7 +338,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.complete(),
-            "Completed\n\n完成内容",
+            "● Completed (0s)\n\n完成内容",
         )
 
     def test_commentary_completion_removes_transient_text(self) -> None:
@@ -338,7 +348,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "Working",
+            "○ Working (0s)",
         )
 
     def test_footer_statusline_renders_at_bottom(self) -> None:
@@ -347,7 +357,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "Working\n\ngpt-5.4 default · 100% left · ~/teledex",
+            "○ Working (0s)\n\ngpt-5.4 default · 100% left · ~/teledex",
         )
 
     def test_final_stream_clears_transient_sections(self) -> None:
@@ -356,7 +366,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_tool_state("call_1", command_text="cat README.md", output_text="hello")
         preview.update_stream_text("最终输出")
 
-        self.assertEqual(preview.render(), "Working\n\n最终输出")
+        self.assertEqual(preview.render(), "○ Working (0s)\n\n最终输出")
 
 
 if __name__ == "__main__":
