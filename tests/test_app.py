@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -514,7 +513,21 @@ class LivePreviewStateTestCase(unittest.TestCase):
         )
         preview = LivePreviewState()
         preview.update_commentary("msg_1", "实时过程")
-        stop_event = threading.Event()
+        class _StopEvent:
+            def __init__(self) -> None:
+                self._set = False
+
+            def is_set(self) -> bool:
+                return self._set
+
+            def wait(self, timeout: float) -> bool:
+                self._set = True
+                return True
+
+            def set(self) -> None:
+                self._set = True
+
+        stop_event = _StopEvent()
         attempts: list[str] = []
 
         def fake_update_preview(
@@ -527,15 +540,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
             return True
 
         app._update_preview = fake_update_preview  # type: ignore[method-assign]
-        worker = threading.Thread(
-            target=app._run_preview_loop,
-            args=(active_run, preview, stop_event),
-            daemon=True,
-        )
-        worker.start()
-        worker.join(timeout=0.3)
-        stop_event.set()
-        worker.join(timeout=0.3)
+        app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
         self.assertEqual(attempts, ["○ Working (0m)\n\n实时过程"])
         self.assertFalse(preview.has_pending_stream())
