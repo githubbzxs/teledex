@@ -5,7 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from teledex.app import ActiveRun, IncomingMessage, LivePreviewState, TeledexApp
+from teledex.app import (
+    ActiveRun,
+    IncomingMessage,
+    LivePreviewState,
+    TeledexApp,
+    _next_preview_deadline,
+    _normalize_preview_interval,
+)
 from teledex.config import AppConfig
 from teledex.telegram_api import TelegramMessage
 
@@ -191,6 +198,12 @@ class AppMessagingTestCase(unittest.TestCase):
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
+    def test_preview_deadline_catches_up_without_accumulating_drift(self) -> None:
+        self.assertEqual(_normalize_preview_interval(0.0), 0.2)
+        self.assertEqual(_normalize_preview_interval(1.0), 1.0)
+        self.assertEqual(_next_preview_deadline(10.0, 10.2, 1.0), 11.0)
+        self.assertEqual(_next_preview_deadline(10.0, 12.3, 1.0), 13.0)
+
     def test_status_line_tracks_elapsed_with_heartbeat_marker(self) -> None:
         now = [0.0]
         preview = LivePreviewState(initial_status="Thinking", now_func=lambda: now[0])

@@ -37,7 +37,6 @@ HELP_TEXT = """teledex 可用命令：
 使用 `//命令` 可把 `/命令` 作为 Codex 原生命令发送到当前会话。
 直接发送普通文本，即可继续当前活跃会话。"""
 
-_PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 1.0
 _PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_TYPING_INTERVAL_SECONDS = 1.0
 _PREVIEW_STREAM_STEP_CHARS = 1
@@ -343,6 +342,23 @@ def _format_elapsed_compact(seconds: float) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours}h {minutes:02d}m {secs:02d}s"
+
+
+def _normalize_preview_interval(seconds: float) -> float:
+    return max(0.2, float(seconds))
+
+
+def _next_preview_deadline(
+    previous_deadline: float,
+    now: float,
+    interval_seconds: float,
+) -> float:
+    deadline = previous_deadline
+    if deadline <= 0:
+        deadline = now + interval_seconds
+    while deadline <= now:
+        deadline += interval_seconds
+    return deadline
 
 
 class TeledexApp:
@@ -813,6 +829,10 @@ class TeledexApp:
     ) -> None:
         last_preview_text = ""
         last_typing_at = 0.0
+        heartbeat_interval = _normalize_preview_interval(
+            self.config.preview_update_interval_seconds
+        )
+        next_heartbeat_at = time.monotonic()
         while not stop_event.is_set():
             now = time.monotonic()
             if now - last_typing_at >= _PREVIEW_TYPING_INTERVAL_SECONDS:
@@ -839,10 +859,16 @@ class TeledexApp:
                 preview_state.mark_rendered()
 
             wait_seconds = (
-                _PREVIEW_STREAM_INTERVAL_SECONDS
-                if preview_state.has_pending_stream()
-                else _PREVIEW_HEARTBEAT_INTERVAL_SECONDS
+                _PREVIEW_STREAM_INTERVAL_SECONDS if preview_state.has_pending_stream() else 0.0
             )
+            if wait_seconds <= 0:
+                now = time.monotonic()
+                next_heartbeat_at = _next_preview_deadline(
+                    next_heartbeat_at,
+                    now,
+                    heartbeat_interval,
+                )
+                wait_seconds = max(0.0, next_heartbeat_at - now)
             stop_event.wait(wait_seconds)
 
     def _stop_preview_loop(
