@@ -18,6 +18,7 @@ class CodexRunnerTestCase(unittest.TestCase):
             state_dir=Path(self.temp_dir.name),
             poll_timeout_seconds=30,
             preview_update_interval_seconds=1.0,
+            preview_edit_min_interval_seconds=0.0,
             codex_bin="codex",
             codex_exec_mode="full-auto",
             codex_model="gpt-test",

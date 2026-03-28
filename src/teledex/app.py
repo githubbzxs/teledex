@@ -136,6 +136,7 @@ class ActiveRun:
     message_thread_id: int | None
     prompt: str
     preview_message_id: int | None = None
+    preview_last_edit_at: float = 0.0
     process_handle: CodexProcessHandle | None = None
     stop_requested: bool = False
 
@@ -447,6 +448,7 @@ class TeledexApp:
         self._update_offset: int | None = None
         self._telegram_rate_limit_lock = threading.RLock()
         self._telegram_rate_limit_until = 0.0
+        self._preview_edit_lock = threading.RLock()
 
     def _is_local_command(self, text: str) -> bool:
         return self._extract_command(text) in _LOCAL_COMMANDS
@@ -1990,10 +1992,16 @@ class TeledexApp:
         active_run: ActiveRun,
         text: str,
         parse_mode: str | None = None,
+        respect_local_interval: bool = True,
     ) -> bool:
         if active_run.preview_message_id is None:
             return False
         if self._telegram_rate_limit_remaining_seconds() > 0:
+            return False
+        if not self._acquire_preview_edit_slot(
+            active_run,
+            respect_local_interval=respect_local_interval,
+        ):
             return False
         try:
             self.telegram.edit_message_text(
@@ -2024,9 +2032,14 @@ class TeledexApp:
             active_run,
             rendered_html,
             parse_mode="HTML",
+            respect_local_interval=False,
         ):
             return True
-        return self._edit_preview_message(active_run, preview_state.render())
+        return self._edit_preview_message(
+            active_run,
+            preview_state.render(),
+            respect_local_interval=False,
+        )
 
     def _send_run_result(
         self,
@@ -2042,7 +2055,12 @@ class TeledexApp:
                 preview_updated = True
         if not preview_updated:
             inline_text, parse_mode = self._build_inline_result(text)
-            if self._edit_preview_message(active_run, inline_text, parse_mode=parse_mode):
+            if self._edit_preview_message(
+                active_run,
+                inline_text,
+                parse_mode=parse_mode,
+                respect_local_interval=False,
+            ):
                 preview_updated = True
             else:
                 self._safe_send_message(
@@ -2075,6 +2093,23 @@ class TeledexApp:
         suffix = "\n\n[Truncated for length]"
         truncated = plain_text[: plain_limit - len(suffix) - 3].rstrip() + "..." + suffix
         return truncated, None
+
+    def _acquire_preview_edit_slot(
+        self,
+        active_run: ActiveRun,
+        respect_local_interval: bool,
+    ) -> bool:
+        if not respect_local_interval:
+            return True
+        min_interval = max(0.0, self.config.preview_edit_min_interval_seconds)
+        if min_interval <= 0:
+            return True
+        now = time.monotonic()
+        with self._preview_edit_lock:
+            if now - active_run.preview_last_edit_at < min_interval:
+                return False
+            active_run.preview_last_edit_at = now
+            return True
 
     def _sync_bot_commands(self) -> None:
         try:

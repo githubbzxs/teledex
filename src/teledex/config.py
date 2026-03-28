@@ -30,6 +30,7 @@ class AppConfig:
     state_dir: Path
     poll_timeout_seconds: int
     preview_update_interval_seconds: float
+    preview_edit_min_interval_seconds: float
     codex_bin: str
     codex_exec_mode: str
     codex_model: str | None
@@ -55,6 +56,9 @@ class AppConfig:
         poll_timeout_seconds = int(os.environ.get("TELEDEX_POLL_TIMEOUT_SECONDS", "30"))
         preview_update_interval_seconds = float(
             os.environ.get("TELEDEX_PREVIEW_UPDATE_INTERVAL_SECONDS", "60.0")
+        )
+        preview_edit_min_interval_seconds = float(
+            os.environ.get("TELEDEX_PREVIEW_EDIT_MIN_INTERVAL_SECONDS", "5.0")
         )
         codex_bin = os.environ.get("TELEDEX_CODEX_BIN", "codex").strip() or "codex"
         codex_exec_mode = (
@@ -83,6 +87,7 @@ class AppConfig:
             state_dir=state_dir,
             poll_timeout_seconds=poll_timeout_seconds,
             preview_update_interval_seconds=preview_update_interval_seconds,
+            preview_edit_min_interval_seconds=preview_edit_min_interval_seconds,
             codex_bin=codex_bin,
             codex_exec_mode=codex_exec_mode,
             codex_model=codex_model,

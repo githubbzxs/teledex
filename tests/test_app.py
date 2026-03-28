@@ -37,6 +37,7 @@ class AppMessagingTestCase(unittest.TestCase):
             state_dir=Path(self.temp_dir.name),
             poll_timeout_seconds=30,
             preview_update_interval_seconds=1.0,
+            preview_edit_min_interval_seconds=0.0,
             codex_bin="codex",
             codex_exec_mode="default",
             codex_model=None,
@@ -112,6 +113,7 @@ class AppMessagingTestCase(unittest.TestCase):
             active_run: ActiveRun,
             text: str,
             parse_mode: str | None = None,
+            respect_local_interval: bool = True,
         ) -> bool:
             calls.append(
                 {
@@ -149,6 +151,7 @@ class AppMessagingTestCase(unittest.TestCase):
             active_run: ActiveRun,
             text: str,
             parse_mode: str | None = None,
+            respect_local_interval: bool = True,
         ) -> bool:
             calls.append(
                 {
@@ -187,6 +190,7 @@ class AppMessagingTestCase(unittest.TestCase):
             active_run: ActiveRun,
             text: str,
             parse_mode: str | None = None,
+            respect_local_interval: bool = True,
         ) -> bool:
             edit_calls.append(
                 {
@@ -254,6 +258,7 @@ class AppMessagingTestCase(unittest.TestCase):
             active_run: ActiveRun,
             text: str,
             parse_mode: str | None = None,
+            respect_local_interval: bool = True,
         ) -> bool:
             return False
 
@@ -308,6 +313,100 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertFalse(updated)
         self.assertGreater(self.app._telegram_rate_limit_remaining_seconds(), 0)
+
+    def test_edit_preview_message_respects_local_min_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token="test-token",
+                    authorized_user_ids={1},
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=1.0,
+                    preview_edit_min_interval_seconds=5.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                )
+            )
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+            preview_last_edit_at=10.0,
+        )
+        calls: list[str] = []
+
+        def fake_edit_message_text(**kwargs) -> None:
+            calls.append(str(kwargs["text"]))
+
+        app.telegram.edit_message_text = fake_edit_message_text  # type: ignore[method-assign]
+
+        with patch("teledex.app.time.monotonic", return_value=12.0):
+            updated = app._edit_preview_message(active_run, "预览内容")
+
+        self.assertFalse(updated)
+        self.assertEqual(calls, [])
+
+        with patch("teledex.app.time.monotonic", return_value=15.1):
+            updated = app._edit_preview_message(active_run, "预览内容")
+
+        self.assertTrue(updated)
+        self.assertEqual(calls, ["预览内容"])
+
+    def test_send_run_result_bypasses_local_preview_interval_for_final_render(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token="test-token",
+                    authorized_user_ids={1},
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=1.0,
+                    preview_edit_min_interval_seconds=5.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                )
+            )
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+            preview_last_edit_at=10.0,
+        )
+        preview = LivePreviewState()
+        calls: list[str] = []
+
+        def fake_edit_message_text(**kwargs) -> None:
+            calls.append(str(kwargs["text"]))
+
+        app.telegram.edit_message_text = fake_edit_message_text  # type: ignore[method-assign]
+        app._safe_send_message = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+        with patch("teledex.app.time.monotonic", return_value=12.0):
+            app._send_run_result(active_run, "最终回复", preview)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("最终回复", calls[0])
 
     def test_safe_send_message_can_schedule_retry_when_rate_limited(self) -> None:
         calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -951,6 +1050,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
                     state_dir=Path(temp_dir),
                     poll_timeout_seconds=30,
                     preview_update_interval_seconds=1.0,
+                    preview_edit_min_interval_seconds=0.0,
                     codex_bin="codex",
                     codex_exec_mode="default",
                     codex_model=None,
@@ -997,6 +1097,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
                     state_dir=Path(temp_dir),
                     poll_timeout_seconds=30,
                     preview_update_interval_seconds=60.0,
+                    preview_edit_min_interval_seconds=0.0,
                     codex_bin="codex",
                     codex_exec_mode="default",
                     codex_model=None,
@@ -1059,6 +1160,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
                     state_dir=Path(temp_dir),
                     poll_timeout_seconds=30,
                     preview_update_interval_seconds=60.0,
+                    preview_edit_min_interval_seconds=0.0,
                     codex_bin="codex",
                     codex_exec_mode="default",
                     codex_model=None,

@@ -21,6 +21,7 @@ class ConfigTestCase(unittest.TestCase):
                 config = AppConfig.from_env()
 
         self.assertEqual(config.preview_update_interval_seconds, 60.0)
+        self.assertEqual(config.preview_edit_min_interval_seconds, 5.0)
 
 
 if __name__ == "__main__":
