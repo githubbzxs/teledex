@@ -35,6 +35,8 @@ class AppConfig:
     codex_model: str | None
     codex_enable_search: bool
     codex_persist_extended_history: bool
+    tmux_bin: str
+    tmux_shell: str
     log_level: str
 
     @classmethod
@@ -69,6 +71,10 @@ class AppConfig:
             os.environ.get("TELEDEX_CODEX_PERSIST_EXTENDED_HISTORY"),
             True,
         )
+        tmux_bin = os.environ.get("TELEDEX_TMUX_BIN", "tmux").strip() or "tmux"
+        tmux_shell = os.environ.get("TELEDEX_TMUX_SHELL", "").strip() or (
+            os.environ.get("SHELL", "").strip() or "/bin/bash"
+        )
         log_level = os.environ.get("TELEDEX_LOG_LEVEL", "INFO").strip().upper() or "INFO"
 
         return cls(
@@ -82,5 +88,7 @@ class AppConfig:
             codex_model=codex_model,
             codex_enable_search=codex_enable_search,
             codex_persist_extended_history=codex_persist_extended_history,
+            tmux_bin=tmux_bin,
+            tmux_shell=tmux_shell,
             log_level=log_level,
         )

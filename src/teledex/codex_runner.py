@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import signal
+import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import AppConfig
 from .formatting import extract_first_bold_markdown
@@ -17,9 +17,18 @@ from .formatting import extract_first_bold_markdown
 
 @dataclass(slots=True)
 class CodexProcessHandle:
-    process: subprocess.Popen[str]
+    tmux_session_name: str
+    tmux_target: str
     output_file: Path
     event_log_file: Path
+    status_file: Path
+    prompt_file: Path
+
+
+@dataclass(slots=True)
+class CodexProcessStatus:
+    exit_code: int
+    error_message: str | None = None
 
 
 @dataclass(slots=True)
@@ -57,12 +66,37 @@ class CodexRunner:
         self.config = config
         self.logger = logging.getLogger("teledex.codex_runner")
 
+    def ensure_terminal(self, session_id: int, cwd: Path) -> str:
+        tmux_session_name = self._tmux_session_name(session_id)
+        if self._tmux_session_exists(tmux_session_name):
+            return tmux_session_name
+        self._run_tmux(
+            [
+                self.config.tmux_bin,
+                "new-session",
+                "-d",
+                "-s",
+                tmux_session_name,
+                "-c",
+                str(cwd),
+                self.config.tmux_shell,
+            ]
+        )
+        return tmux_session_name
+
+    def reset_terminal(self, session_id: int) -> None:
+        tmux_session_name = self._tmux_session_name(session_id)
+        if not self._tmux_session_exists(tmux_session_name):
+            return
+        self._run_tmux([self.config.tmux_bin, "kill-session", "-t", tmux_session_name])
+
     def start(
         self,
         prompt: str,
         cwd: Path,
         thread_id: str | None,
         runtime_dir: Path,
+        session_id: int,
     ) -> CodexProcessHandle:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         output_file = Path(
@@ -71,27 +105,54 @@ class CodexRunner:
         event_log_file = Path(
             tempfile.mkstemp(prefix="codex-events-", suffix=".jsonl", dir=runtime_dir)[1]
         )
+        status_file = Path(
+            tempfile.mkstemp(prefix="codex-status-", suffix=".json", dir=runtime_dir)[1]
+        )
+        prompt_file = Path(
+            tempfile.mkstemp(prefix="codex-prompt-", suffix=".txt", dir=runtime_dir)[1]
+        )
+        prompt_file.write_text(prompt, encoding="utf-8")
+        status_file.unlink(missing_ok=True)
+
+        tmux_session_name = self.ensure_terminal(session_id, cwd)
+        tmux_target = f"{tmux_session_name}:0.0"
         command = self._build_command(
-            prompt=prompt,
             cwd=cwd,
             thread_id=thread_id,
             output_file=output_file,
+            event_log_file=event_log_file,
+            status_file=status_file,
+            prompt_file=prompt_file,
         )
-        self.logger.info("启动 Codex 命令：%s", command)
-        process = subprocess.Popen(
-            command,
-            cwd=str(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            preexec_fn=os.setsid,
+        shell_command = self._build_shell_command(cwd, command)
+        self.logger.info("通过 tmux 启动 Codex 命令：%s", shell_command)
+        self._run_tmux([self.config.tmux_bin, "send-keys", "-t", tmux_target, "C-c"])
+        self._run_tmux(
+            [self.config.tmux_bin, "send-keys", "-t", tmux_target, shell_command, "Enter"]
         )
         return CodexProcessHandle(
-            process=process,
+            tmux_session_name=tmux_session_name,
+            tmux_target=tmux_target,
             output_file=output_file,
             event_log_file=event_log_file,
+            status_file=status_file,
+            prompt_file=prompt_file,
         )
+
+    def wait(
+        self,
+        handle: CodexProcessHandle,
+        on_event_line: Callable[[str], None],
+        poll_interval_seconds: float = 0.1,
+    ) -> CodexProcessStatus:
+        offset = 0
+        while True:
+            offset = self._drain_event_log(handle.event_log_file, offset, on_event_line)
+            status = self.read_status_file(handle.status_file)
+            if status is not None:
+                offset = self._drain_event_log(handle.event_log_file, offset, on_event_line)
+                return status
+            time.sleep(poll_interval_seconds)
 
     def parse_event_line(self, line: str) -> ParsedCodexEvent:
         raw = line.strip()
@@ -111,10 +172,12 @@ class CodexRunner:
 
         event_type = str(payload.get("type", ""))
         if event_type == "thread.started":
-            return _with_footer(ParsedCodexEvent(
-                status_text="Working",
-                thread_id=payload.get("thread_id"),
-            ))
+            return _with_footer(
+                ParsedCodexEvent(
+                    status_text="Working",
+                    thread_id=payload.get("thread_id"),
+                )
+            )
         if event_type == "turn.started":
             return _with_footer(ParsedCodexEvent(status_text="Working"))
         if event_type == "turn.completed":
@@ -122,9 +185,7 @@ class CodexRunner:
         if event_type == "statusline.updated":
             return ParsedCodexEvent(footer_statusline=footer_statusline)
         if event_type == "turn.interrupted":
-            message = _normalize_status_text(
-                str(payload.get("message") or "Interrupted")
-            )
+            message = _normalize_status_text(str(payload.get("message") or "Interrupted"))
             return _with_footer(ParsedCodexEvent(status_text=message or "Interrupted"))
         if event_type == "turn.failed":
             message = _normalize_status_text(str(payload.get("message") or "Failed"))
@@ -140,29 +201,35 @@ class CodexRunner:
             text = str(payload.get("text") or "").strip()
             if not plan_id or not text:
                 return ParsedCodexEvent(footer_statusline=footer_statusline)
-            return _with_footer(ParsedCodexEvent(
-                status_text="Working",
-                commentary_id=plan_id,
-                commentary_text=text,
-            ))
+            return _with_footer(
+                ParsedCodexEvent(
+                    status_text="Working",
+                    commentary_id=plan_id,
+                    commentary_text=text,
+                )
+            )
         if event_type == "reasoning.updated":
             item_id = str(payload.get("item_id") or "").strip()
             text = str(payload.get("text") or "").strip()
             if not item_id or not text:
                 return ParsedCodexEvent(footer_statusline=footer_statusline)
-            return _with_footer(ParsedCodexEvent(
-                status_text=extract_first_bold_markdown(text) or None,
-                commentary_id=f"reasoning:{item_id}",
-                commentary_text=text,
-            ))
+            return _with_footer(
+                ParsedCodexEvent(
+                    status_text=extract_first_bold_markdown(text) or None,
+                    commentary_id=f"reasoning:{item_id}",
+                    commentary_text=text,
+                )
+            )
         if event_type == "command.output":
             text = str(payload.get("text") or "").strip()
             if not text:
                 return _with_footer(ParsedCodexEvent(status_text="Working"))
-            return _with_footer(ParsedCodexEvent(
-                status_text="Working",
-                tool_output_text=text,
-            ))
+            return _with_footer(
+                ParsedCodexEvent(
+                    status_text="Working",
+                    tool_output_text=text,
+                )
+            )
         if event_type.startswith("exec.command.") or event_type.startswith("patch."):
             return _with_footer(ParsedCodexEvent(status_text="Working"))
 
@@ -174,25 +241,31 @@ class CodexRunner:
                 item_id = str(item.get("id", "")).strip() or None
                 phase = str(item.get("phase", "")).strip()
                 if phase == "commentary":
-                    return _with_footer(ParsedCodexEvent(
-                        status_text=None,
-                        commentary_id=item_id,
-                        commentary_text=text or None,
-                    ))
-                return _with_footer(ParsedCodexEvent(
-                    status_text="Working" if phase == "final_answer" or text else None,
-                    preview_text=text or None,
-                    final_message=(text or None) if event_type == "item.completed" else None,
-                ))
+                    return _with_footer(
+                        ParsedCodexEvent(
+                            status_text=None,
+                            commentary_id=item_id,
+                            commentary_text=text or None,
+                        )
+                    )
+                return _with_footer(
+                    ParsedCodexEvent(
+                        status_text="Working" if phase == "final_answer" or text else None,
+                        preview_text=text or None,
+                        final_message=(text or None) if event_type == "item.completed" else None,
+                    )
+                )
             if item_type == "plan":
                 text = str(item.get("text", "")).strip()
                 item_id = str(item.get("id", "")).strip() or "plan"
                 if text:
-                    return _with_footer(ParsedCodexEvent(
-                        status_text="Working",
-                        commentary_id=f"plan:{item_id}",
-                        commentary_text=text,
-                    ))
+                    return _with_footer(
+                        ParsedCodexEvent(
+                            status_text="Working",
+                            commentary_id=f"plan:{item_id}",
+                            commentary_text=text,
+                        )
+                    )
                 return _with_footer(ParsedCodexEvent(status_text="Working"))
             if item_type == "reasoning":
                 summary = item.get("summary")
@@ -206,19 +279,23 @@ class CodexRunner:
                     summary_text = "\n\n".join(parts).strip()
                     if summary_text:
                         item_id = str(item.get("id", "")).strip() or "reasoning"
-                        return _with_footer(ParsedCodexEvent(
-                            status_text=extract_first_bold_markdown(summary_text) or None,
-                            commentary_id=f"reasoning:{item_id}",
-                            commentary_text=summary_text,
-                        ))
+                        return _with_footer(
+                            ParsedCodexEvent(
+                                status_text=extract_first_bold_markdown(summary_text) or None,
+                                commentary_id=f"reasoning:{item_id}",
+                                commentary_text=summary_text,
+                            )
+                        )
             if item_type == "command_execution":
                 command = str(item.get("command", "")).strip()
                 aggregated_output = str(item.get("aggregatedOutput") or "").strip()
                 if aggregated_output:
-                    return _with_footer(ParsedCodexEvent(
-                        status_text="Working",
-                        tool_output_text=aggregated_output,
-                    ))
+                    return _with_footer(
+                        ParsedCodexEvent(
+                            status_text="Working",
+                            tool_output_text=aggregated_output,
+                        )
+                    )
                 if command:
                     return _with_footer(ParsedCodexEvent(status_text="Working"))
                 return _with_footer(ParsedCodexEvent(status_text="Working"))
@@ -234,10 +311,6 @@ class CodexRunner:
         text = output_file.read_text(encoding="utf-8", errors="replace").strip()
         return text or None
 
-    def append_event_log(self, event_log_file: Path, line: str) -> None:
-        with event_log_file.open("a", encoding="utf-8") as file:
-            file.write(line)
-
     def tail_event_log(self, event_log_file: Path, max_lines: int = 20) -> str | None:
         if not event_log_file.exists():
             return None
@@ -246,17 +319,25 @@ class CodexRunner:
             return None
         return "\n".join(lines[-max_lines:])
 
+    def read_status_file(self, status_file: Path) -> CodexProcessStatus | None:
+        if not status_file.exists():
+            return None
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+        exit_code = int(payload.get("exit_code", 1))
+        error_message = str(payload.get("error_message") or "").strip() or None
+        return CodexProcessStatus(exit_code=exit_code, error_message=error_message)
+
     def terminate(self, handle: CodexProcessHandle) -> None:
-        if handle.process.poll() is not None:
-            return
-        os.killpg(os.getpgid(handle.process.pid), signal.SIGTERM)
+        self._run_tmux([self.config.tmux_bin, "send-keys", "-t", handle.tmux_target, "C-c"])
 
     def _build_command(
         self,
-        prompt: str,
         cwd: Path,
         thread_id: str | None,
         output_file: Path,
+        event_log_file: Path,
+        status_file: Path,
+        prompt_file: Path,
     ) -> list[str]:
         helper_path = Path(__file__).with_name("codex_app_server_exec.py").resolve()
         command: list[str] = [
@@ -269,10 +350,14 @@ class CodexRunner:
             str(cwd),
             "--output-file",
             str(output_file),
+            "--event-log-file",
+            str(event_log_file),
+            "--status-file",
+            str(status_file),
+            "--prompt-file",
+            str(prompt_file),
             "--exec-mode",
             self.config.codex_exec_mode,
-            "--prompt",
-            prompt,
         ]
 
         if thread_id:
@@ -286,3 +371,41 @@ class CodexRunner:
         if self.config.codex_persist_extended_history:
             command.append("--persist-extended-history")
         return command
+
+    def _build_shell_command(self, cwd: Path, command: list[str]) -> str:
+        return "cd {cwd} && {command}".format(
+            cwd=shlex.quote(str(cwd)),
+            command=" ".join(shlex.quote(part) for part in command),
+        )
+
+    def _tmux_session_name(self, session_id: int) -> str:
+        return f"teledex-session-{session_id}"
+
+    def _tmux_session_exists(self, session_name: str) -> bool:
+        result = subprocess.run(
+            [self.config.tmux_bin, "has-session", "-t", session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+
+    def _run_tmux(self, command: list[str]) -> None:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+
+    def _drain_event_log(
+        self,
+        event_log_file: Path,
+        offset: int,
+        on_event_line: Callable[[str], None],
+    ) -> int:
+        if not event_log_file.exists():
+            return offset
+        with event_log_file.open("r", encoding="utf-8", errors="replace") as file:
+            file.seek(offset)
+            while True:
+                line = file.readline()
+                if not line:
+                    break
+                on_event_line(line)
+            return file.tell()

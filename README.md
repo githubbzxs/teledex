@@ -11,9 +11,6 @@
   <a href="./README.zh-CN.md">
     <img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2563EB?style=flat" alt="简体中文文档" />
   </a>
-  <a href="./docs/PLAN.md">
-    <img src="https://img.shields.io/badge/Plan-0F172A?style=flat" alt="Product plan" />
-  </a>
 </p>
 
 <p>
@@ -42,9 +39,10 @@ Instead of trying to become a full platform, it focuses on the core remote workf
 - Whitelist-based access control
 - Multiple sessions with create, list, and switch actions
 - Per-session working directory binding
-- Persistent runs based on `codex exec` and `codex exec resume`
+- Persistent `tmux` terminal per bound directory
+- Codex runs executed inside the persistent terminal context
 - Live `draft` preview updates inside a single Telegram message
-- `/stop` support for interrupting the current run
+- `/tstop` support for interrupting the current run
 - SQLite persistence for users, sessions, and run state
 
 ## Tech Stack
@@ -52,7 +50,7 @@ Instead of trying to become a full platform, it focuses on the core remote workf
 <p>
   <img src="https://img.shields.io/badge/Python-Service-3776AB?style=flat&logo=python&logoColor=white" alt="Python service" />
   <img src="https://img.shields.io/badge/sqlite3-State_Storage-0F80CC?style=flat&logo=sqlite&logoColor=white" alt="sqlite3 state storage" />
-  <img src="https://img.shields.io/badge/subprocess-Codex_Bridge-4B5563?style=flat" alt="subprocess Codex bridge" />
+  <img src="https://img.shields.io/badge/tmux-Persistent_Terminal-4B5563?style=flat" alt="tmux persistent terminal" />
   <img src="https://img.shields.io/badge/HTML-Telegram_Rendering-E34F26?style=flat&logo=html5&logoColor=white" alt="Telegram rendering" />
   <img src="https://img.shields.io/badge/systemd-Service_Management-FFB000?style=flat" alt="systemd service management" />
 </p>
@@ -60,7 +58,7 @@ Instead of trying to become a full platform, it focuses on the core remote workf
 - Service implementation: `Python 3.11+`
 - Messaging interface: `Telegram Bot API`
 - State storage: `SQLite`, `sqlite3`
-- Codex bridge: `subprocess`, `codex` CLI
+- Codex bridge: `tmux`, `codex` CLI, app-server
 - Deployment: local long-running process, `systemd`
 
 ## Project Structure
@@ -71,14 +69,12 @@ src/teledex/
   app.py                   Telegram loop and command dispatch
   config.py                Environment variable parsing
   storage.py               SQLite persistence layer
-  codex_runner.py          Codex process startup and event parsing
+  codex_runner.py          tmux terminal startup and Codex event parsing
   codex_app_server_exec.py Codex execution wrapper
   telegram_api.py          Telegram HTTP API client
   formatting.py            Markdown/HTML rendering and message splitting
 deploy/
   teledex.service          systemd service example
-docs/
-  PLAN.md                  Product goals and implementation notes
 ```
 
 ## Quick Start
@@ -133,17 +129,21 @@ The repository ships with a ready-to-copy `.env.example`. Core variables:
 - `TELEDEX_CODEX_EXEC_MODE`: Codex execution mode, supports `default`, `full-auto`, `dangerous`
 - `TELEDEX_CODEX_MODEL`: optional Codex model override
 - `TELEDEX_CODEX_ENABLE_SEARCH`: whether search is enabled
+- `TELEDEX_TMUX_BIN`: path to the tmux executable, default `tmux`
+- `TELEDEX_TMUX_SHELL`: shell used to start the tmux session, defaults to `SHELL` or `/bin/bash`
 - `TELEDEX_LOG_LEVEL`: log level, default `INFO`
 
 ## Telegram Commands
 
 - `/start`: show help text
-- `/new [title]`: create a new session
-- `/sessions`: list sessions
-- `/use <id>`: switch the active session
-- `/bind <absolute-path>`: bind the working directory of the active session
-- `/pwd`: show the bound directory
-- `/stop`: stop the current task
+- `/tnew [title]`: create a teledex session
+- `/tsessions`: list sessions
+- `/tuse <id>`: switch the active session
+- `/tbind <absolute-path>`: bind the working directory and start the persistent tmux terminal
+- `/tpwd`: show the bound directory
+- `/tstop`: stop the current task
+
+All other `/commands` are forwarded directly into the active Codex session.
 
 Plain text messages are sent to the current active session and executed inside its bound directory.
 
@@ -151,7 +151,8 @@ Plain text messages are sent to the current active session and executed inside i
 
 - Each authorized user keeps an active session pointer
 - Each session can be bound to a real project directory
-- The first run creates a Codex thread, and later messages reuse it when possible
+- Binding a directory starts a persistent `tmux` terminal for that session
+- The first run creates a Codex thread, and later messages try to reuse it inside the same terminal context
 - One Telegram preview message is refreshed continuously while the task runs
 - Final output and run status are written back after completion
 

@@ -23,6 +23,8 @@ class CodexRunnerTestCase(unittest.TestCase):
             codex_model="gpt-test",
             codex_enable_search=False,
             codex_persist_extended_history=True,
+            tmux_bin="tmux",
+            tmux_shell="/bin/bash",
             log_level="INFO",
         )
         self.runner = CodexRunner(self.config)
@@ -168,16 +170,27 @@ class CodexRunnerTestCase(unittest.TestCase):
 
     def test_build_command_uses_app_server_helper(self) -> None:
         output_file = Path(self.temp_dir.name) / "last.txt"
+        event_log_file = Path(self.temp_dir.name) / "events.jsonl"
+        status_file = Path(self.temp_dir.name) / "status.json"
+        prompt_file = Path(self.temp_dir.name) / "prompt.txt"
         command = self.runner._build_command(
-            prompt="你好",
             cwd=Path("/root/teledex"),
             thread_id="thread-123",
             output_file=output_file,
+            event_log_file=event_log_file,
+            status_file=status_file,
+            prompt_file=prompt_file,
         )
 
         self.assertGreaterEqual(len(command), 3)
         self.assertEqual(command[1], "-u")
         self.assertTrue(command[2].endswith("codex_app_server_exec.py"))
+        self.assertIn("--event-log-file", command)
+        self.assertIn(str(event_log_file), command)
+        self.assertIn("--status-file", command)
+        self.assertIn(str(status_file), command)
+        self.assertIn("--prompt-file", command)
+        self.assertIn(str(prompt_file), command)
         self.assertIn("--thread-id", command)
         self.assertIn("thread-123", command)
         self.assertIn("--model", command)

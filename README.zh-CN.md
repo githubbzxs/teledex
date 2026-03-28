@@ -11,9 +11,6 @@
   <a href="./README.zh-CN.md">
     <img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2563EB?style=flat" alt="简体中文文档" />
   </a>
-  <a href="./docs/PLAN.md">
-    <img src="https://img.shields.io/badge/%E4%BA%A7%E5%93%81%E8%AE%A1%E5%88%92-0F172A?style=flat" alt="产品计划" />
-  </a>
 </p>
 
 <p>
@@ -42,10 +39,11 @@
 - 白名单鉴权，限制可访问用户
 - 多会话创建、列表查看与切换
 - 每个会话可绑定独立工作目录
-- 基于 `codex exec` / `codex exec resume` 的持续会话
+- 每个目录绑定一个持久 `tmux` 终端
+- 通过 `tmux` 终端复用 Codex 会话与目录上下文
 - 基于 app-server 结构化通知的实时预览桥接
 - 单条消息实时刷新 `draft` 过程预览
-- `/stop` 中断当前执行任务
+- `/tstop` 中断当前执行任务
 - SQLite 本地持久化用户、会话与运行状态
 
 ## 技术栈
@@ -53,7 +51,7 @@
 <p>
   <img src="https://img.shields.io/badge/Python-%E6%9C%8D%E5%8A%A1%E5%AE%9E%E7%8E%B0-3776AB?style=flat&logo=python&logoColor=white" alt="Python 服务实现" />
   <img src="https://img.shields.io/badge/sqlite3-%E7%8A%B6%E6%80%81%E5%AD%98%E5%82%A8-0F80CC?style=flat&logo=sqlite&logoColor=white" alt="sqlite3 状态存储" />
-  <img src="https://img.shields.io/badge/subprocess-Codex_%E6%A1%A5%E6%8E%A5-4B5563?style=flat" alt="subprocess Codex 桥接" />
+  <img src="https://img.shields.io/badge/tmux-%E6%8C%81%E4%B9%85%E7%BB%88%E7%AB%AF-4B5563?style=flat" alt="tmux 持久终端" />
   <img src="https://img.shields.io/badge/HTML-Telegram_%E6%B6%88%E6%81%AF%E6%B8%B2%E6%9F%93-E34F26?style=flat&logo=html5&logoColor=white" alt="Telegram 消息渲染" />
   <img src="https://img.shields.io/badge/systemd-%E6%9C%8D%E5%8A%A1%E6%89%98%E7%AE%A1-FFB000?style=flat" alt="systemd 服务托管" />
 </p>
@@ -61,7 +59,7 @@
 - 服务实现：`Python 3.11+`
 - 消息入口：`Telegram Bot API`
 - 状态存储：`SQLite`、`sqlite3`
-- Codex 执行桥接：`subprocess`、`codex` CLI
+- Codex 执行桥接：`tmux`、`codex` CLI、app-server
 - 部署方式：本地常驻进程、`systemd`
 
 ## 项目结构
@@ -72,14 +70,12 @@ src/teledex/
   app.py                   Telegram 主循环与命令分发
   config.py                环境变量配置解析
   storage.py               SQLite 状态存储
-  codex_runner.py          Codex 进程启动与事件解析
+  codex_runner.py          tmux 持久终端与 Codex 事件解析
   codex_app_server_exec.py Codex 执行包装器
   telegram_api.py          Telegram HTTP API 封装
   formatting.py            Markdown/HTML 渲染与消息切分
 deploy/
   teledex.service          systemd 服务示例
-docs/
-  PLAN.md                  产品目标与实现规划
 ```
 
 ## 快速开始
@@ -135,17 +131,21 @@ PYTHONPATH=src python3 -m teledex
 - `TELEDEX_CODEX_MODEL`：可选的 Codex 模型覆盖
 - `TELEDEX_CODEX_ENABLE_SEARCH`：是否启用搜索能力
 - `TELEDEX_CODEX_PERSIST_EXTENDED_HISTORY`：是否持久化更完整的线程历史，默认 `true`
+- `TELEDEX_TMUX_BIN`：tmux 可执行文件路径，默认 `tmux`
+- `TELEDEX_TMUX_SHELL`：tmux 会话默认 shell，默认读取当前 `SHELL`，缺省为 `/bin/bash`
 - `TELEDEX_LOG_LEVEL`：日志级别，默认 `INFO`
 
 ## Telegram 命令
 
 - `/start`：查看帮助说明
-- `/new [标题]`：新建会话
-- `/sessions`：查看会话列表
-- `/use <id>`：切换当前会话
-- `/bind <绝对路径>`：绑定当前会话目录
-- `/pwd`：查看当前会话目录
-- `/stop`：停止当前任务
+- `/tnew [标题]`：新建 teledex 会话
+- `/tsessions`：查看会话列表
+- `/tuse <id>`：切换当前会话
+- `/tbind <绝对路径>`：绑定当前会话目录并启动持久 tmux 终端
+- `/tpwd`：查看当前会话目录
+- `/tstop`：停止当前任务
+
+除以上管理命令外，其他 `/命令` 会直接转发给当前 Codex 会话。
 
 普通文本消息会默认发送给当前活跃会话，并在其绑定目录中继续执行。
 
@@ -153,7 +153,8 @@ PYTHONPATH=src python3 -m teledex
 
 - 每个授权用户都维护自己的活跃会话指针
 - 每个会话都可以绑定一个真实项目目录
-- 首次执行会创建 Codex 线程，后续消息会尽量复用已有线程
+- 绑定目录时会先启动一个持久 `tmux` 终端
+- 首次执行会创建 Codex 线程，后续消息会在同一终端里尽量复用已有线程
 - 默认开启 `persistExtendedHistory`，让后续 resume 更完整保留上下文
 - 执行过程中会持续刷新同一条 Telegram 预览消息
 - 预览会分开展示思考摘要、工具输出与最终回复流

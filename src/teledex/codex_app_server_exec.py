@@ -182,10 +182,33 @@ class AppServerClient:
         raise RuntimeError(f"未知 app-server 消息：{line.strip()}")
 
 
-def _emit_event(payload: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+def _emit_event(payload: dict[str, Any], event_writer) -> None:
+    line = json.dumps(payload, ensure_ascii=False)
+    if event_writer is not None:
+        event_writer.write(line)
+        event_writer.write("\n")
+        event_writer.flush()
+    sys.stdout.write(line)
     sys.stdout.write("\n")
     sys.stdout.flush()
+
+
+def _write_status(
+    status_file: Path | None,
+    *,
+    exit_code: int,
+    error_message: str | None = None,
+) -> None:
+    if status_file is None:
+        return
+    payload = {
+        "exit_code": exit_code,
+        "error_message": error_message,
+    }
+    status_file.write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def _normalize_item(item: Any) -> Any:
@@ -687,15 +710,28 @@ def _map_notification(
     return None
 
 
+def _load_prompt(args: argparse.Namespace) -> str:
+    if args.prompt_file:
+        return Path(args.prompt_file).read_text(encoding="utf-8")
+    return str(args.prompt or "")
+
+
 def run(args: argparse.Namespace) -> int:
     client: AppServerClient | None = None
+    event_writer = None
+    status_file = Path(args.status_file) if args.status_file else None
     final_response = ""
     latest_agent_message_by_id: dict[str, dict[str, Any]] = {}
     latest_plan_text_by_id: dict[str, str] = {}
     reasoning_summary_by_id: dict[str, dict[int, str]] = {}
     command_output_by_id: dict[str, str] = {}
     fallback_agent_response = ""
+    prompt = _load_prompt(args)
     try:
+        if args.event_log_file:
+            event_log_file = Path(args.event_log_file)
+            event_log_file.parent.mkdir(parents=True, exist_ok=True)
+            event_writer = event_log_file.open("a", encoding="utf-8")
         cwd = Path(args.cwd).resolve()
         client = AppServerClient.start(args.codex_bin, cwd)
         try:
@@ -742,11 +778,12 @@ def run(args: argparse.Namespace) -> int:
                 "type": "thread.started",
                 "thread_id": thread_id,
                 **({"footer_statusline": initial_statusline["footer_statusline"]} if initial_statusline else {}),
-            }
+            },
+            event_writer,
         )
         request_id = client.send_request(
             "turn/start",
-            _build_turn_start_params(thread_id, args.prompt),
+            _build_turn_start_params(thread_id, prompt),
         )
         request_acked = False
         turn_completed = False
@@ -781,7 +818,7 @@ def run(args: argparse.Namespace) -> int:
             )
             if event is None:
                 continue
-            _emit_event(event)
+            _emit_event(event, event_writer)
 
             item = event.get("item")
             if (
@@ -803,13 +840,21 @@ def run(args: argparse.Namespace) -> int:
             final_response or fallback_agent_response,
             encoding="utf-8",
         )
+        _write_status(status_file, exit_code=0)
         return 0
+    except KeyboardInterrupt:
+        _emit_event({"type": "turn.interrupted", "message": "任务已中断"}, event_writer)
+        _write_status(status_file, exit_code=130, error_message="任务已中断")
+        return 130
     except Exception as exc:
-        _emit_event({"type": "error", "message": str(exc)})
+        _emit_event({"type": "error", "message": str(exc)}, event_writer)
+        _write_status(status_file, exit_code=1, error_message=str(exc))
         return 1
     finally:
         if client is not None:
             client.close()
+        if event_writer is not None:
+            event_writer.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -818,12 +863,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--output-file", required=True)
     parser.add_argument("--exec-mode", required=True)
-    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--prompt")
+    parser.add_argument("--prompt-file")
+    parser.add_argument("--event-log-file")
+    parser.add_argument("--status-file")
     parser.add_argument("--thread-id")
     parser.add_argument("--model")
     parser.add_argument("--search", action="store_true")
     parser.add_argument("--persist-extended-history", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if bool(args.prompt) == bool(args.prompt_file):
+        parser.error("--prompt 和 --prompt-file 必须且只能提供一个")
+    return args
 
 
 if __name__ == "__main__":

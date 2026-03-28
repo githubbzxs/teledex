@@ -27,15 +27,15 @@ from .telegram_api import (
 
 HELP_TEXT = """teledex 可用命令：
 /start - 查看帮助
-/new [标题] - 新建会话
-/sessions - 查看会话列表
-/use <id> - 切换当前会话
-/bind <绝对路径> - 绑定当前会话目录
-/pwd - 查看当前会话目录
-/stop - 停止当前任务
+/tnew [标题] - 新建 teledex 会话
+/tsessions - 查看会话列表
+/tuse <id> - 切换当前会话
+/tbind <绝对路径> - 绑定当前会话目录并启动持久 tmux 终端
+/tpwd - 查看当前会话目录
+/tstop - 停止当前任务
 
-使用 `//命令` 可把 `/命令` 作为 Codex 原生命令发送到当前会话。
-直接发送普通文本，即可继续当前活跃会话。"""
+除以上管理命令外，其他 `/命令` 会直接作为 Codex 原生命令发送到当前会话。
+直接发送普通文本，也会继续当前活跃会话。"""
 
 _PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_TYPING_INTERVAL_SECONDS = 1.0
@@ -373,6 +373,20 @@ class TeledexApp:
         self._active_runs_lock = threading.RLock()
         self._update_offset: int | None = None
 
+    def _is_local_command(self, text: str) -> bool:
+        command_text = text.split()[0]
+        command = command_text.split("@", 1)[0].lower()
+        return command in {
+            "/start",
+            "/help",
+            "/tnew",
+            "/tsessions",
+            "/tuse",
+            "/tbind",
+            "/tpwd",
+            "/tstop",
+        }
+
     def run_forever(self) -> None:
         bot = self.telegram.get_me()
         self.logger.info("Telegram bot 已连接: @%s", bot.get("username", "unknown"))
@@ -433,7 +447,7 @@ class TeledexApp:
             self._handle_prompt(self._normalize_incoming_message(incoming))
             return
 
-        if incoming.text.startswith("/"):
+        if incoming.text.startswith("/") and self._is_local_command(incoming.text):
             self._handle_command(incoming)
             return
 
@@ -455,27 +469,27 @@ class TeledexApp:
         command = command_text.split("@", 1)[0].lower()
         args = incoming.text[len(command_text) :].strip()
 
-        if command == "/start":
+        if command in {"/help", "/start"}:
             self._safe_send_message(incoming.chat_id, HELP_TEXT, incoming.message_thread_id)
             return
 
-        if command == "/new":
+        if command == "/tnew":
             title = args or f"会话 {len(self.storage.list_sessions(incoming.user_id)) + 1}"
             session = self.storage.create_session(incoming.user_id, title)
             self._safe_send_message(
                 incoming.chat_id,
-                f"已创建会话 #{session.id}\n标题：{session.title}\n接下来请先用 /bind 绑定目录。",
+                f"已创建会话 #{session.id}\n标题：{session.title}\n接下来请先用 /tbind 绑定目录。",
                 incoming.message_thread_id,
             )
             return
 
-        if command == "/sessions":
+        if command == "/tsessions":
             sessions = self.storage.list_sessions(incoming.user_id)
             user = self.storage.get_user(incoming.user_id)
             if not sessions:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前还没有会话，先用 /new 创建一个。",
+                    "当前还没有会话，先用 /tnew 创建一个。",
                     incoming.message_thread_id,
                 )
                 return
@@ -498,11 +512,11 @@ class TeledexApp:
             )
             return
 
-        if command == "/use":
+        if command == "/tuse":
             if not args:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "用法：/use <id>",
+                    "用法：/tuse <id>",
                     incoming.message_thread_id,
                 )
                 return
@@ -531,19 +545,19 @@ class TeledexApp:
             )
             return
 
-        if command == "/bind":
+        if command == "/tbind":
             active_session = self.storage.get_active_session(incoming.user_id)
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前没有活跃会话，请先用 /new 或 /use。",
+                    "当前没有活跃会话，请先用 /tnew 或 /tuse。",
                     incoming.message_thread_id,
                 )
                 return
             if not args:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "用法：/bind <绝对路径>",
+                    "用法：/tbind <绝对路径>",
                     incoming.message_thread_id,
                 )
                 return
@@ -551,7 +565,7 @@ class TeledexApp:
             if not bound_path.is_absolute():
                 self._safe_send_message(
                     incoming.chat_id,
-                    "请提供绝对路径，例如 /bind /root/project。",
+                    "请提供绝对路径，例如 /tbind /root/project。",
                     incoming.message_thread_id,
                 )
                 return
@@ -567,19 +581,28 @@ class TeledexApp:
                 incoming.user_id,
                 str(bound_path),
             )
-            self._safe_send_message(
-                incoming.chat_id,
-                f"会话 #{active_session.id} 已绑定目录：\n{bound_path}",
-                incoming.message_thread_id,
-            )
+            try:
+                self.runner.reset_terminal(active_session.id)
+                tmux_session_name = self.runner.ensure_terminal(active_session.id, bound_path)
+                message = (
+                    f"会话 #{active_session.id} 已绑定目录：\n{bound_path}\n"
+                    f"持久终端：tmux `{tmux_session_name}`"
+                )
+            except Exception as exc:
+                self.logger.exception("初始化 tmux 会话失败")
+                message = (
+                    f"会话 #{active_session.id} 已绑定目录：\n{bound_path}\n"
+                    f"但持久 tmux 终端初始化失败：{exc}"
+                )
+            self._safe_send_message(incoming.chat_id, message, incoming.message_thread_id)
             return
 
-        if command == "/pwd":
+        if command == "/tpwd":
             active_session = self.storage.get_active_session(incoming.user_id)
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前没有活跃会话，请先用 /new 或 /use。",
+                    "当前没有活跃会话，请先用 /tnew 或 /tuse。",
                     incoming.message_thread_id,
                 )
                 return
@@ -591,12 +614,12 @@ class TeledexApp:
             )
             return
 
-        if command == "/stop":
+        if command == "/tstop":
             active_session = self.storage.get_active_session(incoming.user_id)
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前没有活跃会话，请先用 /new 或 /use。",
+                    "当前没有活跃会话，请先用 /tnew 或 /tuse。",
                     incoming.message_thread_id,
                 )
                 return
@@ -625,21 +648,21 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前没有活跃会话，请先用 /new 创建，或用 /use 切换。",
+                "当前没有活跃会话，请先用 /tnew 创建，或用 /tuse 切换。",
                 incoming.message_thread_id,
             )
             return
         if not session.bound_path:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前会话还没有绑定目录，请先用 /bind <绝对路径>。",
+                "当前会话还没有绑定目录，请先用 /tbind <绝对路径>。",
                 incoming.message_thread_id,
             )
             return
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"会话 #{session.id} 正在执行中，请稍后或先 /stop。",
+                f"会话 #{session.id} 正在执行中，请稍后或先 /tstop。",
                 incoming.message_thread_id,
             )
             return
@@ -701,6 +724,7 @@ class TeledexApp:
                 cwd=Path(session.bound_path),
                 thread_id=session.codex_thread_id,
                 runtime_dir=self.config.state_dir / "runtime",
+                session_id=session.id,
             )
             with self._active_runs_lock:
                 current = self._active_runs.get(session.id)
@@ -709,12 +733,8 @@ class TeledexApp:
                     if current.stop_requested:
                         self.runner.terminate(handle)
 
-            stdout = handle.process.stdout
-            if stdout is None:
-                raise RuntimeError("未拿到 Codex 输出流")
-
-            for line in stdout:
-                self.runner.append_event_log(handle.event_log_file, line)
+            def _handle_event_line(line: str) -> None:
+                nonlocal final_message
                 parsed = self.runner.parse_event_line(line)
                 if parsed.thread_id:
                     self.storage.update_session_thread_id(session.id, parsed.thread_id)
@@ -734,13 +754,13 @@ class TeledexApp:
                 if parsed.status_text:
                     preview_state.update_status(parsed.status_text)
 
-            return_code = handle.process.wait()
-            if return_code != 0:
+            status = self.runner.wait(handle, _handle_event_line)
+            if status.exit_code != 0:
                 if active_run.stop_requested:
                     raise InterruptedError("任务已停止")
                 event_tail = self.runner.tail_event_log(handle.event_log_file) or "无事件日志"
                 raise RuntimeError(
-                    f"Codex 退出码异常：{return_code}\n最近事件：\n{event_tail}"
+                    f"Codex 退出码异常：{status.exit_code}\n最近事件：\n{event_tail}"
                 )
 
             if not final_message:
@@ -803,6 +823,14 @@ class TeledexApp:
                     active_run.process_handle.event_log_file.unlink(missing_ok=True)
                 except OSError:
                     self.logger.warning("清理 Codex 事件日志失败：%s", active_run.process_handle.event_log_file)
+                try:
+                    active_run.process_handle.status_file.unlink(missing_ok=True)
+                except OSError:
+                    self.logger.warning("清理 Codex 状态文件失败：%s", active_run.process_handle.status_file)
+                try:
+                    active_run.process_handle.prompt_file.unlink(missing_ok=True)
+                except OSError:
+                    self.logger.warning("清理 Codex 提示词文件失败：%s", active_run.process_handle.prompt_file)
             with self._active_runs_lock:
                 self._active_runs.pop(session.id, None)
 

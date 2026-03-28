@@ -41,6 +41,8 @@ class AppMessagingTestCase(unittest.TestCase):
             codex_model=None,
             codex_enable_search=False,
             codex_persist_extended_history=True,
+            tmux_bin="tmux",
+            tmux_shell="/bin/bash",
             log_level="INFO",
         )
         self.app = TeledexApp(self.config)
@@ -195,6 +197,66 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(prompts, ["/status"])
         self.assertEqual(commands, [])
+
+    def test_handle_update_routes_unknown_slash_command_to_prompt(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        prompts: list[str] = []
+        commands: list[str] = []
+
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming.text)
+
+        def fake_handle_command(incoming: IncomingMessage) -> None:
+            commands.append(incoming.text)
+
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+        self.app._handle_command = fake_handle_command  # type: ignore[method-assign]
+
+        self.app._handle_update(
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 456,
+                    "text": "/new",
+                    "from": {"id": 1},
+                    "chat": {"id": 100},
+                    "message_thread_id": 9,
+                },
+            }
+        )
+
+        self.assertEqual(prompts, ["/new"])
+        self.assertEqual(commands, [])
+
+    def test_handle_update_routes_local_management_command(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        prompts: list[str] = []
+        commands: list[str] = []
+
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming.text)
+
+        def fake_handle_command(incoming: IncomingMessage) -> None:
+            commands.append(incoming.text)
+
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+        self.app._handle_command = fake_handle_command  # type: ignore[method-assign]
+
+        self.app._handle_update(
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 789,
+                    "text": "/tbind /root/demo",
+                    "from": {"id": 1},
+                    "chat": {"id": 100},
+                    "message_thread_id": 9,
+                },
+            }
+        )
+
+        self.assertEqual(prompts, [])
+        self.assertEqual(commands, ["/tbind /root/demo"])
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
