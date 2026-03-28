@@ -19,6 +19,7 @@ from .telegram_api import (
     TelegramApiError,
     TelegramClient,
     TelegramMessage,
+    TelegramRateLimitError,
     is_message_not_modified_error,
 )
 
@@ -444,6 +445,8 @@ class TeledexApp:
         self._active_runs: dict[int, ActiveRun] = {}
         self._active_runs_lock = threading.RLock()
         self._update_offset: int | None = None
+        self._telegram_rate_limit_lock = threading.RLock()
+        self._telegram_rate_limit_until = 0.0
 
     def _is_local_command(self, text: str) -> bool:
         return self._extract_command(text) in _LOCAL_COMMANDS
@@ -468,12 +471,102 @@ class TeledexApp:
                 for update in updates:
                     self._update_offset = int(update["update_id"]) + 1
                     self._handle_update(update)
+            except TelegramRateLimitError as exc:
+                delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+                self.logger.warning("Telegram 轮询触发限流，%s 秒后重试。", delay)
+                time.sleep(delay)
             except TelegramApiError:
                 self.logger.exception("Telegram 轮询失败")
                 time.sleep(3)
             except Exception:
                 self.logger.exception("主循环异常")
                 time.sleep(3)
+
+    def _remember_telegram_rate_limit(self, retry_after_seconds: int) -> int:
+        delay = max(1, retry_after_seconds) + 1
+        with self._telegram_rate_limit_lock:
+            self._telegram_rate_limit_until = max(
+                self._telegram_rate_limit_until,
+                time.monotonic() + delay,
+            )
+        return delay
+
+    def _telegram_rate_limit_remaining_seconds(self) -> float:
+        with self._telegram_rate_limit_lock:
+            return max(0.0, self._telegram_rate_limit_until - time.monotonic())
+
+    def _wait_for_telegram_rate_limit(self, max_wait_seconds: float | None = None) -> bool:
+        remaining = self._telegram_rate_limit_remaining_seconds()
+        if remaining <= 0:
+            return True
+        if max_wait_seconds is not None and remaining > max_wait_seconds:
+            return False
+        time.sleep(remaining)
+        return True
+
+    def _schedule_delayed_message_send(
+        self,
+        chat_id: int,
+        text: str,
+        message_thread_id: int | None,
+        reply_to_message_id: int | None = None,
+        parse_mode: str | None = None,
+        attempts_remaining: int = 2,
+    ) -> None:
+        worker = threading.Thread(
+            target=self._delayed_send_message,
+            args=(
+                chat_id,
+                text,
+                message_thread_id,
+                reply_to_message_id,
+                parse_mode,
+                attempts_remaining,
+            ),
+            daemon=True,
+        )
+        worker.start()
+
+    def _delayed_send_message(
+        self,
+        chat_id: int,
+        text: str,
+        message_thread_id: int | None,
+        reply_to_message_id: int | None,
+        parse_mode: str | None,
+        attempts_remaining: int,
+    ) -> None:
+        if attempts_remaining <= 0:
+            self.logger.error("Telegram 延迟消息重试次数已耗尽。")
+            return
+        if not self._wait_for_telegram_rate_limit(max_wait_seconds=900):
+            self.logger.error("Telegram 限流窗口过长，放弃延迟发送消息。")
+            return
+        try:
+            self.telegram.send_message(
+                chat_id=chat_id,
+                text=text,
+                message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                parse_mode=parse_mode,
+            )
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning(
+                "Telegram 延迟消息仍被限流，%s 秒后继续重试，剩余 %s 次。",
+                delay,
+                attempts_remaining - 1,
+            )
+            self._schedule_delayed_message_send(
+                chat_id,
+                text,
+                message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                parse_mode=parse_mode,
+                attempts_remaining=attempts_remaining - 1,
+            )
+        except TelegramApiError:
+            self.logger.exception("延迟发送 Telegram 消息失败")
 
     def _handle_update(self, update: dict) -> None:
         message = update.get("message")
@@ -1900,6 +1993,8 @@ class TeledexApp:
     ) -> bool:
         if active_run.preview_message_id is None:
             return False
+        if self._telegram_rate_limit_remaining_seconds() > 0:
+            return False
         try:
             self.telegram.edit_message_text(
                 chat_id=active_run.chat_id,
@@ -1909,6 +2004,10 @@ class TeledexApp:
                 parse_mode=parse_mode,
             )
             return True
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning("Telegram 预览更新触发限流，%s 秒内暂停预览发送。", delay)
+            return False
         except TelegramApiError as exc:
             if is_message_not_modified_error(exc):
                 return True
@@ -1951,6 +2050,7 @@ class TeledexApp:
                     inline_text,
                     active_run.message_thread_id,
                     parse_mode=parse_mode,
+                    defer_on_rate_limit=True,
                 )
                 return
         self._send_completion_notice(active_run)
@@ -1960,6 +2060,7 @@ class TeledexApp:
             active_run.chat_id,
             "已完成",
             active_run.message_thread_id,
+            defer_on_rate_limit=True,
         )
 
     def _build_inline_result(self, text: str) -> tuple[str, str | None]:
@@ -1987,12 +2088,17 @@ class TeledexApp:
         action: str,
         message_thread_id: int | None,
     ) -> None:
+        if self._telegram_rate_limit_remaining_seconds() > 0:
+            return
         try:
             self.telegram.send_chat_action(
                 chat_id=chat_id,
                 action=action,
                 message_thread_id=message_thread_id,
             )
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning("Telegram chat action 触发限流，%s 秒内暂停发送。", delay)
         except TelegramApiError:
             self.logger.debug("发送 Telegram chat action 失败", exc_info=True)
 
@@ -2003,7 +2109,18 @@ class TeledexApp:
         message_thread_id: int | None,
         reply_to_message_id: int | None = None,
         parse_mode: str | None = None,
+        defer_on_rate_limit: bool = False,
     ) -> TelegramMessage | None:
+        if self._telegram_rate_limit_remaining_seconds() > 0:
+            if defer_on_rate_limit:
+                self._schedule_delayed_message_send(
+                    chat_id,
+                    text,
+                    message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
+                    parse_mode=parse_mode,
+                )
+            return None
         try:
             return self.telegram.send_message(
                 chat_id=chat_id,
@@ -2012,6 +2129,18 @@ class TeledexApp:
                 reply_to_message_id=reply_to_message_id,
                 parse_mode=parse_mode,
             )
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning("Telegram 消息发送触发限流，%s 秒内暂停发送。", delay)
+            if defer_on_rate_limit:
+                self._schedule_delayed_message_send(
+                    chat_id,
+                    text,
+                    message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
+                    parse_mode=parse_mode,
+                )
+            return None
         except TelegramApiError:
             self.logger.exception("发送 Telegram 消息失败")
             return None

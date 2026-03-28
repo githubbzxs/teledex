@@ -12,6 +12,14 @@ class TelegramApiError(RuntimeError):
     """Telegram API 错误。"""
 
 
+class TelegramRateLimitError(TelegramApiError):
+    """Telegram API 限流错误。"""
+
+    def __init__(self, detail: str, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = max(1, int(retry_after_seconds))
+        super().__init__(detail)
+
+
 @dataclass(slots=True)
 class TelegramMessage:
     chat_id: int
@@ -142,13 +150,51 @@ class TelegramClient:
                 body = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            retry_after = _extract_retry_after_seconds(detail)
+            if retry_after is not None:
+                raise TelegramRateLimitError(
+                    f"Telegram HTTP 错误: {detail}",
+                    retry_after_seconds=retry_after,
+                ) from exc
             raise TelegramApiError(f"Telegram HTTP 错误: {detail}") from exc
         except urllib.error.URLError as exc:
             raise TelegramApiError(f"Telegram 连接失败: {exc}") from exc
 
         if not body.get("ok"):
+            retry_after = _extract_retry_after_seconds(body)
+            if retry_after is not None:
+                raise TelegramRateLimitError(
+                    f"Telegram API 返回失败: {body}",
+                    retry_after_seconds=retry_after,
+                )
             raise TelegramApiError(f"Telegram API 返回失败: {body}")
         return body["result"]
+
+
+def _extract_retry_after_seconds(body: str | dict[str, Any]) -> int | None:
+    payload: dict[str, Any] | None
+    if isinstance(body, str):
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+    else:
+        payload = body
+
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("error_code", 0) or 0) != 429:
+        return None
+    parameters = payload.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+    retry_after = parameters.get("retry_after")
+    if retry_after is None:
+        return None
+    try:
+        return max(1, int(retry_after))
+    except (TypeError, ValueError):
+        return None
 
 
 def is_message_not_modified_error(error: Exception) -> bool:

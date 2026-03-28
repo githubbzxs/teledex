@@ -15,7 +15,7 @@ from teledex.app import (
     _normalize_preview_interval,
 )
 from teledex.config import AppConfig
-from teledex.telegram_api import TelegramMessage
+from teledex.telegram_api import TelegramMessage, TelegramRateLimitError
 
 
 class _FakeThread:
@@ -202,6 +202,7 @@ class AppMessagingTestCase(unittest.TestCase):
             message_thread_id: int | None,
             reply_to_message_id: int | None = None,
             parse_mode: str | None = None,
+            defer_on_rate_limit: bool = False,
         ) -> TelegramMessage:
             notice_calls.append(
                 {
@@ -262,6 +263,7 @@ class AppMessagingTestCase(unittest.TestCase):
             message_thread_id: int | None,
             reply_to_message_id: int | None = None,
             parse_mode: str | None = None,
+            defer_on_rate_limit: bool = False,
         ) -> TelegramMessage:
             calls.append(
                 {
@@ -285,6 +287,51 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIn("最终回复", str(calls[0]["text"]))
+
+    def test_edit_preview_message_pauses_when_telegram_is_rate_limited(self) -> None:
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+
+        def fake_edit_message_text(**kwargs) -> None:
+            raise TelegramRateLimitError("限流", retry_after_seconds=12)
+
+        self.app.telegram.edit_message_text = fake_edit_message_text  # type: ignore[method-assign]
+
+        updated = self.app._edit_preview_message(active_run, "预览内容")
+
+        self.assertFalse(updated)
+        self.assertGreater(self.app._telegram_rate_limit_remaining_seconds(), 0)
+
+    def test_safe_send_message_can_schedule_retry_when_rate_limited(self) -> None:
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def fake_send_message(**kwargs) -> TelegramMessage:
+            raise TelegramRateLimitError("限流", retry_after_seconds=15)
+
+        def fake_schedule_delayed_message_send(*args, **kwargs) -> None:
+            calls.append((args, kwargs))
+
+        self.app.telegram.send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._schedule_delayed_message_send = fake_schedule_delayed_message_send  # type: ignore[method-assign]
+
+        result = self.app._safe_send_message(
+            100,
+            "最终回复",
+            9,
+            parse_mode="HTML",
+            defer_on_rate_limit=True,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][:3], (100, "最终回复", 9))
 
     def test_handle_prompt_allows_other_session_to_run_in_parallel(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
