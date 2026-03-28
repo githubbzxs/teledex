@@ -119,11 +119,6 @@ class LivePreviewState:
             if normalized == self._target_text:
                 return
             self._target_text = normalized
-            self._commentary_order.clear()
-            self._commentary_text_by_id.clear()
-            self._tool_order.clear()
-            self._tool_command_by_id.clear()
-            self._tool_output_by_id.clear()
             self._in_progress = True
             self._flush_requested = True
 
@@ -904,6 +899,17 @@ class TeledexApp:
                 last_typing_at = now
 
             now = time.monotonic()
+            animation_due = next_animation_at <= now
+            heartbeat_due = next_heartbeat_at <= now
+            if not animation_due and not heartbeat_due:
+                wait_seconds = min(
+                    _PREVIEW_LOOP_IDLE_SECONDS,
+                    max(0.0, min(next_animation_at, next_heartbeat_at) - now),
+                )
+                if stop_event.wait(wait_seconds):
+                    break
+                continue
+
             animation_ticks = 0
             while next_animation_at <= now:
                 animation_ticks += 1
@@ -919,14 +925,17 @@ class TeledexApp:
                     animate_steps=animation_ticks,
                     elapsed_seconds=heartbeat_step_seconds * heartbeat_ticks,
                 )
+                preview_synced = text == last_preview_text
                 if text and text != last_preview_text:
-                    self._update_preview(active_run, text, prefer_html=False)
-                    last_preview_text = text
-                if has_pending_stream:
+                    preview_synced = self._update_preview(
+                        active_run,
+                        text,
+                        prefer_html=False,
+                    )
+                    if preview_synced:
+                        last_preview_text = text
+                if has_pending_stream and preview_synced:
                     preview_state.mark_rendered()
-
-            if stop_event.wait(_PREVIEW_LOOP_IDLE_SECONDS):
-                break
 
     def _stop_preview_loop(
         self,
@@ -945,8 +954,11 @@ class TeledexApp:
         deadline = time.monotonic() + _PREVIEW_DRAIN_TIMEOUT_SECONDS
         while preview_state.has_pending_stream() and time.monotonic() < deadline:
             text = preview_state.advance(animate_steps=0, elapsed_seconds=0)
-            self._update_preview(active_run, text, prefer_html=False)
-            preview_state.mark_rendered()
+            if not text:
+                preview_state.mark_rendered()
+                break
+            if self._update_preview(active_run, text, prefer_html=False):
+                preview_state.mark_rendered()
             time.sleep(_PREVIEW_LOOP_IDLE_SECONDS)
 
     def _update_preview(

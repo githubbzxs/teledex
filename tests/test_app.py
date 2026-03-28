@@ -168,6 +168,55 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("gpt-5.4 default · 98% left · ~/teledex", str(calls[0]["text"]))
         self.assertEqual(calls[0]["parse_mode"], "HTML")
 
+    def test_handle_prompt_allows_other_session_to_run_in_parallel(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session_1 = self.app.storage.create_session(1, "会话一")
+        session_2 = self.app.storage.create_session(1, "会话二")
+        self.app.storage.bind_session_path(session_1.id, 1, self.temp_dir.name)
+        self.app.storage.bind_session_path(session_2.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session_2.id)
+        self.app._active_runs[session_1.id] = ActiveRun(
+            run_id=1,
+            session_id=session_1.id,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="session 1",
+            preview_message_id=111,
+        )
+
+        calls: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            calls.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=654,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        incoming = IncomingMessage(
+            chat_id=100,
+            user_id=1,
+            text="并行跑第二个会话",
+            message_id=321,
+            message_thread_id=9,
+        )
+
+        with patch("teledex.app.threading.Thread", _FakeThread):
+            self.app._handle_prompt(incoming)
+
+        self.assertEqual(calls, ["○ Working (0m)"])
+        self.assertIn(session_1.id, self.app._active_runs)
+        self.assertIn(session_2.id, self.app._active_runs)
+
     def test_sync_bot_commands_registers_management_commands(self) -> None:
         commands: list[tuple[tuple[str, str], ...]] = []
 
@@ -375,7 +424,64 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_tool_state("call_1", command_text="cat README.md", output_text="hello")
         preview.update_stream_text("最终输出")
 
-        self.assertEqual(preview.render(), "○ Working (0m)\n\n最终输出")
+        self.assertEqual(
+            preview.render(),
+            "○ Working (0m)\n\n先检查 README\n\ncat README.md\nhello\n\n最终输出",
+        )
+
+    def test_complete_clears_transient_sections_and_keeps_final_output(self) -> None:
+        preview = LivePreviewState()
+        preview.update_commentary("msg_1", "先检查 README")
+        preview.update_tool_state("call_1", command_text="cat README.md", output_text="hello")
+        preview.update_stream_text("最终输出")
+
+        self.assertEqual(preview.complete(), "● Completed (0m)\n\n最终输出")
+
+    def test_drain_preview_stream_retries_when_preview_edit_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token="test-token",
+                    authorized_user_ids={1},
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=1.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                )
+            )
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        preview = LivePreviewState()
+        preview.update_commentary("msg_1", "先看目录")
+        attempts: list[str] = []
+
+        def fake_update_preview(
+            active_run: ActiveRun,
+            text: str,
+            prefer_html: bool = False,
+        ) -> bool:
+            attempts.append(text)
+            return len(attempts) >= 2
+
+        app._update_preview = fake_update_preview  # type: ignore[method-assign]
+        app._drain_preview_stream(active_run, preview)
+
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertFalse(preview.has_pending_stream())
 
     def test_final_html_only_renders_final_answer_markdown(self) -> None:
         preview = LivePreviewState()
