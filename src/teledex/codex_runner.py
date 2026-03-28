@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
-from .formatting import summarize_command
+from .formatting import extract_first_bold_markdown
 
 
 @dataclass(slots=True)
@@ -31,6 +31,24 @@ class ParsedCodexEvent:
     tool_output_text: str | None = None
     thread_id: str | None = None
     final_message: str | None = None
+
+
+def _normalize_status_text(text: str) -> str:
+    normalized = text.strip()
+    if not normalized:
+        return ""
+    return {
+        "正在准备会话...": "Working",
+        "正在思考...": "Thinking",
+        "正在整理回复...": "Working",
+        "正在调用工具...": "Working",
+        "正在执行命令...": "Working",
+        "工具执行完成": "Working",
+        "任务已中断": "Interrupted",
+        "执行失败": "Failed",
+        "已停止": "Stopped",
+        "已完成": "Completed",
+    }.get(normalized, normalized)
 
 
 class CodexRunner:
@@ -86,24 +104,26 @@ class CodexRunner:
         event_type = str(payload.get("type", ""))
         if event_type == "thread.started":
             return ParsedCodexEvent(
-                status_text="正在准备会话...",
+                status_text="Working",
                 thread_id=payload.get("thread_id"),
             )
         if event_type == "turn.started":
-            return ParsedCodexEvent(status_text="正在思考...")
+            return ParsedCodexEvent(status_text="Working")
         if event_type == "turn.completed":
-            return ParsedCodexEvent(status_text="正在整理回复...")
+            return ParsedCodexEvent(status_text="Working")
         if event_type == "turn.interrupted":
-            message = str(payload.get("message") or "任务已中断").strip()
-            return ParsedCodexEvent(status_text=message or "任务已中断")
+            message = _normalize_status_text(
+                str(payload.get("message") or "Interrupted")
+            )
+            return ParsedCodexEvent(status_text=message or "Interrupted")
         if event_type == "turn.failed":
-            message = str(payload.get("message") or "执行失败").strip()
-            return ParsedCodexEvent(status_text=message or "执行失败")
+            message = _normalize_status_text(str(payload.get("message") or "Failed"))
+            return ParsedCodexEvent(status_text=message or "Failed")
         if event_type == "error":
-            message = str(payload.get("message") or "执行失败").strip()
-            return ParsedCodexEvent(status_text=message or "执行失败")
+            message = _normalize_status_text(str(payload.get("message") or "Failed"))
+            return ParsedCodexEvent(status_text=message or "Failed")
         if event_type == "status.updated":
-            message = str(payload.get("message") or "").strip()
+            message = _normalize_status_text(str(payload.get("message") or ""))
             return ParsedCodexEvent(status_text=message or None)
         if event_type == "plan.updated":
             plan_id = str(payload.get("plan_id") or "").strip()
@@ -111,7 +131,7 @@ class CodexRunner:
             if not plan_id or not text:
                 return ParsedCodexEvent()
             return ParsedCodexEvent(
-                status_text="已更新计划",
+                status_text="Working",
                 commentary_id=plan_id,
                 commentary_text=text,
             )
@@ -121,20 +141,20 @@ class CodexRunner:
             if not item_id or not text:
                 return ParsedCodexEvent()
             return ParsedCodexEvent(
-                status_text="正在思考...",
+                status_text=extract_first_bold_markdown(text) or None,
                 commentary_id=f"reasoning:{item_id}",
                 commentary_text=text,
             )
         if event_type == "command.output":
             text = str(payload.get("text") or "").strip()
             if not text:
-                return ParsedCodexEvent(status_text="正在调用工具...")
+                return ParsedCodexEvent(status_text="Working")
             return ParsedCodexEvent(
-                status_text="正在调用工具...",
+                status_text="Working",
                 tool_output_text=text,
             )
         if event_type.startswith("exec.command.") or event_type.startswith("patch."):
-            return ParsedCodexEvent(status_text="正在调用工具...")
+            return ParsedCodexEvent(status_text="Working")
 
         item = payload.get("item")
         if isinstance(item, dict):
@@ -145,12 +165,12 @@ class CodexRunner:
                 phase = str(item.get("phase", "")).strip()
                 if phase == "commentary":
                     return ParsedCodexEvent(
-                        status_text="正在思考...",
+                        status_text=None,
                         commentary_id=item_id,
                         commentary_text=text or None,
                     )
                 return ParsedCodexEvent(
-                    status_text="正在整理回复..." if phase == "final_answer" or text else None,
+                    status_text="Working" if phase == "final_answer" or text else None,
                     preview_text=text or None,
                     final_message=(text or None) if event_type == "item.completed" else None,
                 )
@@ -159,11 +179,11 @@ class CodexRunner:
                 item_id = str(item.get("id", "")).strip() or "plan"
                 if text:
                     return ParsedCodexEvent(
-                        status_text="已更新计划",
+                        status_text="Working",
                         commentary_id=f"plan:{item_id}",
                         commentary_text=text,
                     )
-                return ParsedCodexEvent(status_text="已更新计划")
+                return ParsedCodexEvent(status_text="Working")
             if item_type == "reasoning":
                 summary = item.get("summary")
                 if isinstance(summary, list):
@@ -177,32 +197,25 @@ class CodexRunner:
                     if summary_text:
                         item_id = str(item.get("id", "")).strip() or "reasoning"
                         return ParsedCodexEvent(
-                            status_text="正在思考...",
+                            status_text=extract_first_bold_markdown(summary_text) or None,
                             commentary_id=f"reasoning:{item_id}",
                             commentary_text=summary_text,
                         )
             if item_type == "command_execution":
                 command = str(item.get("command", "")).strip()
                 aggregated_output = str(item.get("aggregatedOutput") or "").strip()
-                status = str(item.get("status") or "").strip()
                 if aggregated_output:
                     return ParsedCodexEvent(
-                        status_text=(
-                            "正在执行命令..."
-                            if status in {"", "inProgress"}
-                            else "工具执行完成"
-                        ),
+                        status_text="Working",
                         tool_output_text=aggregated_output,
                     )
                 if command:
-                    return ParsedCodexEvent(
-                        status_text=f"正在执行：{summarize_command(command)}"
-                    )
-                return ParsedCodexEvent(status_text="正在执行命令...")
+                    return ParsedCodexEvent(status_text="Working")
+                return ParsedCodexEvent(status_text="Working")
             if "tool" in item_type or item_type in {"shell_call", "function_call"}:
-                return ParsedCodexEvent(status_text="正在调用工具...")
+                return ParsedCodexEvent(status_text="Working")
             if item_type in {"reasoning", "assistant_reasoning"}:
-                return ParsedCodexEvent(status_text="正在思考...")
+                return ParsedCodexEvent(status_text="Thinking")
         return ParsedCodexEvent()
 
     def read_output_file(self, output_file: Path) -> str | None:

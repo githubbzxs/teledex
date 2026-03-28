@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from teledex.formatting import markdown_to_telegram_html, split_markdown_message
+from teledex.formatting import (
+    extract_first_bold_markdown,
+    markdown_to_telegram_html,
+    split_markdown_message,
+)
 
 
 class FormattingTestCase(unittest.TestCase):
@@ -37,6 +41,13 @@ class FormattingTestCase(unittest.TestCase):
             html = markdown_to_telegram_html(part)
             self.assertEqual(html.count("<pre><code>"), html.count("</code></pre>"))
             self.assertNotIn("```", html)
+
+    def test_extract_first_bold_markdown_returns_first_heading(self) -> None:
+        text = "**Thinking**\n\n先检查目录\n\n**Planning**\n\n再整理步骤"
+
+        extracted = extract_first_bold_markdown(text)
+
+        self.assertEqual(extracted, "Thinking")
 
 
 if __name__ == "__main__":

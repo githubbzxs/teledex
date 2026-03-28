@@ -84,8 +84,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertTrue(str(calls[0]["text"]).startswith("思考时间：00:00"))
-        self.assertIn("statusline：○ 正在准备会话...", str(calls[0]["text"]))
+        self.assertTrue(str(calls[0]["text"]).startswith("• Working (0s)"))
 
     def test_send_run_result_never_replies_to_preview_message(self) -> None:
         active_run = ActiveRun(
@@ -118,7 +117,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(len(calls), 1)
-        self.assertIn("● 已完成", str(calls[0]["text"]))
+        self.assertIn("● Completed", str(calls[0]["text"]))
         self.assertIn("最终回复", str(calls[0]["text"]))
         self.assertEqual(calls[0]["parse_mode"], "HTML")
 
@@ -154,12 +153,13 @@ class AppMessagingTestCase(unittest.TestCase):
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
-    def test_heartbeat_marker_toggles(self) -> None:
-        preview = LivePreviewState(initial_status="正在思考...")
+    def test_status_line_tracks_elapsed_without_blinking_marker(self) -> None:
+        now = [0.0]
+        preview = LivePreviewState(initial_status="Thinking", now_func=lambda: now[0])
 
-        self.assertEqual(preview.render(), "思考时间：00:00\n\nstatusline：○ 正在思考...")
-        self.assertEqual(preview.advance(), "思考时间：00:00\n\nstatusline：● 正在思考...")
-        self.assertEqual(preview.advance(), "思考时间：00:00\n\nstatusline：○ 正在思考...")
+        self.assertEqual(preview.render(), "• Thinking (0s)")
+        now[0] = 5.0
+        self.assertEqual(preview.advance(), "• Thinking (5s)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState(stream_step_chars=2)
@@ -167,11 +167,11 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "思考时间：00:00\n\n输出预览：\nabcdef\n\nstatusline：○ 正在输出...",
+            "• Working (0s)\n\nOutput preview\nabcdef",
         )
         self.assertEqual(
             preview.advance(),
-            "思考时间：00:00\n\n输出预览：\nabcdef\n\nstatusline：● 正在输出...",
+            "• Working (0s)\n\nOutput preview\nabcdef",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:
@@ -181,11 +181,11 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_commentary("msg_1", "先看目录")
         preview.update_commentary("msg_2", "再检查配置")
         now[0] = 5.0
-        preview.update_status("正在执行：pwd")
+        preview.update_status("Working")
 
         self.assertEqual(
             preview.render(),
-            "思考时间：00:05\n\n思考过程：\n先看目录\n\n再检查配置\n\nstatusline：○ 正在执行：pwd",
+            "• Working (5s)\n\nThoughts\n先看目录\n\n再检查配置",
         )
 
     def test_tool_output_is_rendered_in_preview(self) -> None:
@@ -194,7 +194,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "思考时间：00:00\n\n工具输出：\nfirst line\nsecond line\n\nstatusline：○ 正在准备会话...",
+            "• Working (0s)\n\nTool output\nfirst line\nsecond line",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -203,7 +203,17 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.complete(),
-            "思考时间：00:00\n\n输出预览：\n完成内容\n\nstatusline：● 已完成",
+            "• Completed (0s)\n\nOutput preview\n完成内容",
+        )
+
+    def test_reasoning_commentary_promotes_bold_heading_to_status_line(self) -> None:
+        preview = LivePreviewState()
+
+        preview.update_commentary("reasoning:item_1", "**Thinking**\n\nChecking files")
+
+        self.assertEqual(
+            preview.render(),
+            "• Thinking (0s)\n\nThoughts\n**Thinking**\n\nChecking files",
         )
 
 

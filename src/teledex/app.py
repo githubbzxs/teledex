@@ -9,7 +9,12 @@ from typing import Callable
 
 from .codex_runner import CodexProcessHandle, CodexRunner
 from .config import AppConfig
-from .formatting import markdown_to_telegram_html, split_markdown_message, strip_citations
+from .formatting import (
+    extract_first_bold_markdown,
+    markdown_to_telegram_html,
+    split_markdown_message,
+    strip_citations,
+)
 from .storage import SessionRecord, Storage
 from .telegram_api import (
     TelegramApiError,
@@ -31,7 +36,6 @@ HELP_TEXT = """teledex 可用命令：
 使用 `//命令` 可把 `/命令` 作为 Codex 原生命令发送到当前会话。
 直接发送普通文本，即可继续当前活跃会话。"""
 
-_PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 1.0
 _PREVIEW_TYPING_INTERVAL_SECONDS = 1.0
 _PREVIEW_STREAM_STEP_CHARS = 1
@@ -67,20 +71,19 @@ class ActiveRun:
 class LivePreviewState:
     def __init__(
         self,
-        initial_status: str = "正在准备会话...",
+        initial_status: str = "Working",
         history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
         output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
         tool_output_max_chars: int = _PREVIEW_TOOL_OUTPUT_MAX_CHARS,
         stream_step_chars: int = _PREVIEW_STREAM_STEP_CHARS,
         now_func: Callable[[], float] | None = None,
     ) -> None:
-        self._status_text = initial_status.strip() or "正在准备会话..."
+        self._status_text = initial_status.strip() or "Working"
         self._target_text = ""
         self._visible_chars = 0
         self._commentary_order: list[str] = []
         self._commentary_text_by_id: dict[str, str] = {}
         self._tool_output_text = ""
-        self._frame_index = 0
         self._history_max_chars = max(1, history_max_chars)
         self._output_max_chars = max(1, output_max_chars)
         self._tool_output_max_chars = max(1, tool_output_max_chars)
@@ -110,7 +113,6 @@ class LivePreviewState:
                 return
             self._target_text = normalized
             self._visible_chars = len(self._target_text)
-            self._status_text = "正在输出..."
             self._in_progress = True
             self._flush_requested = True
 
@@ -126,6 +128,10 @@ class LivePreviewState:
             if previous == normalized:
                 return
             self._commentary_text_by_id[normalized_id] = normalized
+            if normalized_id.startswith("reasoning:"):
+                header = extract_first_bold_markdown(normalized)
+                if header:
+                    self._status_text = header
             self._in_progress = True
             self._flush_requested = True
 
@@ -142,7 +148,6 @@ class LivePreviewState:
 
     def advance(self) -> str:
         with self._lock:
-            self._frame_index = (self._frame_index + 1) % len(_PREVIEW_HEARTBEAT_FRAMES)
             if self._target_text and self._visible_chars < len(self._target_text):
                 self._visible_chars = min(
                     len(self._target_text),
@@ -169,43 +174,39 @@ class LivePreviewState:
     def complete(self) -> str:
         with self._lock:
             self._visible_chars = len(self._target_text)
-            self._status_text = "已完成"
+            self._status_text = "Completed"
             self._in_progress = False
             self._flush_requested = False
             return self._render_locked()
 
     def _render_locked(self) -> str:
-        marker = (
-            _PREVIEW_HEARTBEAT_FRAMES[self._frame_index]
-            if self._in_progress
-            else _PREVIEW_HEARTBEAT_FRAMES[-1]
-        )
-        sections = [f"思考时间：{_format_elapsed_seconds(self._now_func() - self._started_at)}"]
+        sections = [
+            f"• {self._status_text} ({_format_elapsed_compact(self._now_func() - self._started_at)})"
+        ]
         body = self._build_body_locked()
         if body:
             sections.extend(["", body])
-        sections.extend(["", f"statusline：{marker} {self._status_text}".strip()])
         return "\n".join(sections).strip()
 
     def _build_body_locked(self) -> str:
         sections: list[str] = []
         commentary = self._render_commentary_locked()
         if commentary:
-            sections.append(f"思考过程：\n{commentary}")
+            sections.append(f"Thoughts\n{commentary}")
 
         tool_output = _truncate_preview_tail(
             self._tool_output_text,
             self._tool_output_max_chars,
         )
         if tool_output:
-            sections.append(f"工具输出：\n{tool_output}")
+            sections.append(f"Tool output\n{tool_output}")
 
         output_text = _truncate_preview_text(
             self._target_text[: self._visible_chars],
             self._output_max_chars,
         )
         if output_text:
-            sections.append(f"输出预览：\n{output_text}")
+            sections.append(f"Output preview\n{output_text}")
 
         return "\n\n".join(section for section in sections if section).strip()
 
@@ -247,13 +248,16 @@ def _truncate_preview_tail(text: str, max_chars: int) -> str:
     return "...\n" + text[-(max_chars - 4) :].lstrip()
 
 
-def _format_elapsed_seconds(seconds: float) -> str:
+def _format_elapsed_compact(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    if total_seconds < 3600:
+        minutes, secs = divmod(total_seconds, 60)
+        return f"{minutes}m {secs:02d}s"
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
+    return f"{hours}h {minutes:02d}m {secs:02d}s"
 
 
 class TeledexApp:
@@ -640,11 +644,11 @@ class TeledexApp:
                 final_message = self.runner.read_output_file(handle.output_file)
 
             if not final_message:
-                final_message = "任务已完成，但没有捕获到最终回复。"
+                final_message = "Completed, but no final response was captured."
 
             final_message = strip_citations(final_message)
             preview_state.update_stream_text(final_message)
-            preview_state.update_status("正在整理回复...")
+            preview_state.update_status("Working")
             self._stop_preview_loop(preview_stop_event, preview_worker)
             self._drain_preview_stream(active_run, preview_state)
             self._send_run_result(active_run, final_message)
@@ -655,9 +659,9 @@ class TeledexApp:
             )
             self.storage.update_session_status(session.id, "idle")
         except InterruptedError:
-            preview_state.update_status("已停止")
+            preview_state.update_status("Stopped")
             self._stop_preview_loop(preview_stop_event, preview_worker)
-            self._update_preview(active_run, "已停止")
+            self._update_preview(active_run, "Stopped")
             self._safe_send_message(
                 active_run.chat_id,
                 f"会话 #{session.id} 的任务已停止。",
@@ -671,9 +675,9 @@ class TeledexApp:
             self.storage.update_session_status(session.id, "idle")
         except Exception as exc:
             self.logger.exception("执行会话 #%s 失败", session.id)
-            preview_state.update_status("执行失败")
+            preview_state.update_status("Failed")
             self._stop_preview_loop(preview_stop_event, preview_worker)
-            self._update_preview(active_run, "执行失败")
+            self._update_preview(active_run, "Failed")
             self._safe_send_message(
                 active_run.chat_id,
                 f"会话 #{session.id} 执行失败：{exc}",
@@ -817,16 +821,16 @@ class TeledexApp:
 
     def _build_inline_result(self, text: str) -> tuple[str, str | None]:
         cleaned = strip_citations(text).strip()
-        final_markdown = f"**● 已完成** {cleaned}" if cleaned else "**● 已完成**"
+        final_markdown = f"**● Completed** {cleaned}" if cleaned else "**● Completed**"
         html_text = markdown_to_telegram_html(final_markdown)
         if html_text and len(html_text) <= 3500:
             return html_text, "HTML"
 
         plain_limit = 3400
-        plain_text = f"● 已完成 {cleaned}" if cleaned else "● 已完成"
+        plain_text = f"● Completed {cleaned}" if cleaned else "● Completed"
         if len(plain_text) <= plain_limit:
             return plain_text, None
-        suffix = "\n\n[内容较长，已截断]"
+        suffix = "\n\n[Truncated for length]"
         truncated = plain_text[: plain_limit - len(suffix) - 3].rstrip() + "..." + suffix
         return truncated, None
 

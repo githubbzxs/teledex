@@ -26,6 +26,20 @@ def summarize_command(command: str, max_length: int = 60) -> str:
     return command[: max_length - 3].rstrip() + "..."
 
 
+def extract_first_bold_markdown(text: str) -> str | None:
+    normalized = strip_citations(text).strip()
+    if not normalized:
+        return None
+    for pattern in _STRONG_PATTERNS:
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        extracted = " ".join(match.group(1).split()).strip()
+        if extracted:
+            return extracted
+    return None
+
+
 def preview_text_for_agent_message(text: str, max_length: int = 80) -> str:
     single_line = " ".join(text.strip().split())
     if not single_line:

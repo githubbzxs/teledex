@@ -64,7 +64,7 @@ class CodexRunnerTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(parsed.status_text, "正在思考...")
+        self.assertIsNone(parsed.status_text)
         self.assertEqual(parsed.commentary_id, "msg_1")
         self.assertEqual(parsed.commentary_text, "我先检查目录")
         self.assertIsNone(parsed.final_message)
@@ -80,7 +80,7 @@ class CodexRunnerTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(parsed.status_text, "执行失败")
+        self.assertEqual(parsed.status_text, "Failed")
 
     def test_parse_event_line_supports_reasoning_summary_updates(self) -> None:
         parsed = self.runner.parse_event_line(
@@ -88,15 +88,15 @@ class CodexRunnerTestCase(unittest.TestCase):
                 {
                     "type": "reasoning.updated",
                     "item_id": "reasoning_1",
-                    "text": "先检查目录，再确认配置。",
+                    "text": "**Thinking**\n\n先检查目录，再确认配置。",
                 },
                 ensure_ascii=False,
             )
         )
 
-        self.assertEqual(parsed.status_text, "正在思考...")
+        self.assertEqual(parsed.status_text, "Thinking")
         self.assertEqual(parsed.commentary_id, "reasoning:reasoning_1")
-        self.assertEqual(parsed.commentary_text, "先检查目录，再确认配置。")
+        self.assertEqual(parsed.commentary_text, "**Thinking**\n\n先检查目录，再确认配置。")
 
     def test_parse_event_line_supports_command_output(self) -> None:
         parsed = self.runner.parse_event_line(
@@ -110,7 +110,7 @@ class CodexRunnerTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(parsed.status_text, "正在调用工具...")
+        self.assertEqual(parsed.status_text, "Working")
         self.assertEqual(parsed.tool_output_text, "line1\nline2")
 
     def test_parse_event_line_only_marks_final_message_on_completed_agent_message(self) -> None:
