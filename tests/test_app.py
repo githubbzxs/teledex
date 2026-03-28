@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -481,6 +482,62 @@ class LivePreviewStateTestCase(unittest.TestCase):
         app._drain_preview_stream(active_run, preview)
 
         self.assertGreaterEqual(len(attempts), 2)
+        self.assertFalse(preview.has_pending_stream())
+
+    def test_preview_loop_flushes_pending_stream_without_waiting_for_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token="test-token",
+                    authorized_user_ids={1},
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=60.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                )
+            )
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        preview = LivePreviewState()
+        preview.update_commentary("msg_1", "实时过程")
+        stop_event = threading.Event()
+        attempts: list[str] = []
+
+        def fake_update_preview(
+            active_run: ActiveRun,
+            text: str,
+            prefer_html: bool = False,
+        ) -> bool:
+            attempts.append(text)
+            stop_event.set()
+            return True
+
+        app._update_preview = fake_update_preview  # type: ignore[method-assign]
+        worker = threading.Thread(
+            target=app._run_preview_loop,
+            args=(active_run, preview, stop_event),
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=0.3)
+        stop_event.set()
+        worker.join(timeout=0.3)
+
+        self.assertEqual(attempts, ["○ Working (0m)\n\n实时过程"])
         self.assertFalse(preview.has_pending_stream())
 
     def test_final_html_only_renders_final_answer_markdown(self) -> None:

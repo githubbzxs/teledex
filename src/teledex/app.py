@@ -901,9 +901,10 @@ class TeledexApp:
                 last_typing_at = now
 
             now = time.monotonic()
+            has_pending_stream = preview_state.has_pending_stream()
             animation_due = next_animation_at <= now
             heartbeat_due = next_heartbeat_at <= now
-            if not animation_due and not heartbeat_due:
+            if not has_pending_stream and not animation_due and not heartbeat_due:
                 wait_seconds = min(
                     _PREVIEW_LOOP_IDLE_SECONDS,
                     max(0.0, min(next_animation_at, next_heartbeat_at) - now),
@@ -921,7 +922,6 @@ class TeledexApp:
                 heartbeat_ticks += 1
                 next_heartbeat_at += heartbeat_interval
 
-            has_pending_stream = preview_state.has_pending_stream()
             if has_pending_stream or animation_ticks > 0 or heartbeat_ticks > 0:
                 text = preview_state.advance(
                     animate_steps=animation_ticks,
