@@ -300,12 +300,13 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview = LivePreviewState(initial_status="Thinking")
 
         self.assertEqual(preview.render(), "○ Thinking (0m)")
-        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=60), "◔ Thinking (1m)")
+        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=0), "● Thinking (0m)")
+        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=60), "○ Thinking (1m)")
 
     def test_status_line_can_catch_up_multiple_elapsed_seconds(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=180), "◕ Thinking (3m)")
+        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=180), "● Thinking (3m)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState()

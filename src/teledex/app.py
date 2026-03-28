@@ -35,7 +35,8 @@ HELP_TEXT = """teledex 可用命令：
 直接发送普通文本，也会继续当前活跃会话。"""
 
 _PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
-_PREVIEW_HEARTBEAT_FRAMES = ("○", "◔", "◑", "◕")
+_PREVIEW_ANIMATION_INTERVAL_SECONDS = 1.0
+_PREVIEW_HEARTBEAT_FRAMES = ("○", "●")
 _PREVIEW_COMPLETE_FRAME = "●"
 _PREVIEW_HISTORY_MAX_CHARS = 2000
 _PREVIEW_TOOL_OUTPUT_MAX_CHARS = 2000
@@ -888,7 +889,10 @@ class TeledexApp:
             self.config.preview_update_interval_seconds
         )
         heartbeat_step_seconds = max(1, int(round(heartbeat_interval)))
-        next_heartbeat_at = time.monotonic() + heartbeat_interval
+        animation_interval = _PREVIEW_ANIMATION_INTERVAL_SECONDS
+        now = time.monotonic()
+        next_heartbeat_at = now + heartbeat_interval
+        next_animation_at = now + animation_interval
         while not stop_event.is_set():
             now = time.monotonic()
             if now - last_typing_at >= _PREVIEW_TYPING_INTERVAL_SECONDS:
@@ -900,15 +904,19 @@ class TeledexApp:
                 last_typing_at = now
 
             now = time.monotonic()
+            animation_ticks = 0
+            while next_animation_at <= now:
+                animation_ticks += 1
+                next_animation_at += animation_interval
             heartbeat_ticks = 0
             while next_heartbeat_at <= now:
                 heartbeat_ticks += 1
                 next_heartbeat_at += heartbeat_interval
 
             has_pending_stream = preview_state.has_pending_stream()
-            if has_pending_stream or heartbeat_ticks > 0:
+            if has_pending_stream or animation_ticks > 0 or heartbeat_ticks > 0:
                 text = preview_state.advance(
-                    animate_steps=heartbeat_ticks,
+                    animate_steps=animation_ticks,
                     elapsed_seconds=heartbeat_step_seconds * heartbeat_ticks,
                 )
                 if text and text != last_preview_text:
