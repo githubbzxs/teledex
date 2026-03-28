@@ -285,10 +285,6 @@ class LivePreviewState:
         if commentary:
             sections.append(commentary)
 
-        tool_blocks = self._render_tool_blocks_locked()
-        if tool_blocks:
-            sections.append(tool_blocks)
-
         output_text = _truncate_preview_text(
             self._target_text,
             self._output_max_chars,

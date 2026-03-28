@@ -388,7 +388,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0m)\n\n/bin/bash -lc 'pwd'\nfirst line\nsecond line",
+            "○ Working (0m)",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -426,7 +426,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Working (0m)\n\n先检查 README\n\ncat README.md\nhello\n\n最终输出",
+            "○ Working (0m)\n\n先检查 README\n\n最终输出",
         )
 
     def test_complete_clears_transient_sections_and_keeps_final_output(self) -> None:
