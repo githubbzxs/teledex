@@ -482,7 +482,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
-    def test_tnew_uses_unbound_path_title_when_not_provided(self) -> None:
+    def test_legacy_session_commands_are_redirected_to_tbind(self) -> None:
         calls: list[str] = []
 
         def fake_send_message(
@@ -512,8 +512,10 @@ class AppMessagingTestCase(unittest.TestCase):
         )
 
         self.assertEqual(len(calls), 1)
-        self.assertIn("当前名称：未绑定目录 #1", calls[0])
-        self.assertIn("绑定后会自动改成路径名", calls[0])
+        self.assertEqual(
+            calls[0],
+            "这个管理命令已经移除，请直接用 /tbind <绝对路径> 进入目录；如果该目录还没有会话会自动创建，已有则自动切换。",
+        )
 
     def test_tbind_updates_session_name_to_bound_path(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -619,9 +621,6 @@ class AppMessagingTestCase(unittest.TestCase):
             commands[0],
             (
                 ("start", "查看帮助"),
-                ("tnew", "新建会话"),
-                ("tsessions", "查看会话"),
-                ("tuse", "切换会话"),
                 ("tbind", "绑定目录"),
                 ("tpwd", "当前目录"),
                 ("tstop", "停止任务"),

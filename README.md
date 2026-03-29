@@ -136,12 +136,10 @@ The repository ships with a ready-to-copy `.env.example`. Core variables:
 ## Telegram Commands
 
 - `/start`: show help text
-- `/tnew [title]`: create a teledex session
-- `/tsessions`: list sessions
-- `/tuse <id>`: switch the active session
-- `/tbind <absolute-path>`: bind the working directory and start the persistent tmux terminal
+- `/tbind <absolute-path>`: bind the working directory and start the persistent tmux terminal; it creates the session on first bind and reuses it on later binds
 - `/tpwd`: show the bound directory
 - `/tstop`: stop the current task
+- `/twipe`: wipe the current user's teledex state
 
 All other `/commands` are forwarded directly into the active Codex session.
 

@@ -27,10 +27,7 @@ from .telegram_api import (
 
 HELP_TEXT = """teledex 可用命令：
 /start - 查看帮助
-/tnew - 新建 teledex 会话
-/tsessions - 查看会话列表
-/tuse <id> - 切换当前会话
-/tbind <绝对路径> - 绑定当前会话目录并启动持久 tmux 终端
+/tbind <绝对路径> - 绑定目录；若未创建会话会自动创建，若目录已绑定会自动切换
 /tpwd - 查看当前会话目录
 /tstop - 停止当前任务
 /twipe - 清空当前用户全部 teledex 状态
@@ -50,9 +47,6 @@ _PREVIEW_LOOP_IDLE_SECONDS = 0.1
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
 _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "查看帮助"),
-    ("tnew", "新建会话"),
-    ("tsessions", "查看会话"),
-    ("tuse", "切换会话"),
     ("tbind", "绑定目录"),
     ("tpwd", "当前目录"),
     ("tstop", "停止任务"),
@@ -61,13 +55,15 @@ _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
 _LOCAL_COMMANDS = {
     "/start",
     "/help",
-    "/tnew",
-    "/tsessions",
-    "/tuse",
     "/tbind",
     "/tpwd",
     "/tstop",
     "/twipe",
+}
+_LEGACY_LOCAL_COMMANDS = {
+    "/tnew",
+    "/tsessions",
+    "/tuse",
 }
 _MIRRORED_CODEX_COMMANDS = {
     "/agent",
@@ -455,7 +451,7 @@ class TeledexApp:
         self._preview_edit_lock = threading.RLock()
 
     def _is_local_command(self, text: str) -> bool:
-        return self._extract_command(text) in _LOCAL_COMMANDS
+        return self._extract_command(text) in (_LOCAL_COMMANDS | _LEGACY_LOCAL_COMMANDS)
 
     def _is_mirrored_codex_command(self, text: str) -> bool:
         return self._extract_command(text) in _MIRRORED_CODEX_COMMANDS
@@ -645,90 +641,10 @@ class TeledexApp:
             self._safe_send_message(incoming.chat_id, HELP_TEXT, incoming.message_thread_id)
             return
 
-        if command == "/tnew":
-            title = args or f"未绑定目录 #{len(self.storage.list_sessions(incoming.user_id)) + 1}"
-            session = self.storage.create_session(incoming.user_id, title)
-            self.storage.set_active_session(
-                incoming.user_id,
-                session.id,
-                chat_id=incoming.chat_id,
-                message_thread_id=incoming.message_thread_id,
-            )
+        if command in _LEGACY_LOCAL_COMMANDS:
             self._safe_send_message(
                 incoming.chat_id,
-                f"已创建会话 #{session.id}\n当前名称：{session.title}\n接下来请先用 /tbind 绑定目录，绑定后会自动改成路径名。",
-                incoming.message_thread_id,
-            )
-            return
-
-        if command == "/tsessions":
-            sessions = self.storage.list_sessions(incoming.user_id)
-            user = self.storage.get_user(incoming.user_id)
-            if not sessions:
-                self._safe_send_message(
-                    incoming.chat_id,
-                    "当前还没有会话，先用 /tnew 创建一个。",
-                    incoming.message_thread_id,
-                )
-                return
-
-            lines = ["你的会话列表："]
-            active_session = self.storage.get_active_session(
-                incoming.user_id,
-                incoming.chat_id,
-                incoming.message_thread_id,
-            )
-            active_id = active_session.id if active_session else (user.active_session_id if user else None)
-            for session in sessions:
-                active_mark = " <- 当前" if session.id == active_id else ""
-                path = session.bound_path or "未绑定目录"
-                thread_state = "已创建 Codex 会话" if session.codex_thread_id else "尚未执行"
-                lines.append(
-                    f"#{session.id} [{session.status}] {session.title}{active_mark}\n"
-                    f"目录：{path}\n"
-                    f"Codex：{thread_state}"
-                )
-            self._send_long_message(
-                incoming.chat_id,
-                "\n\n".join(lines),
-                incoming.message_thread_id,
-            )
-            return
-
-        if command == "/tuse":
-            if not args:
-                self._safe_send_message(
-                    incoming.chat_id,
-                    "用法：/tuse <id>",
-                    incoming.message_thread_id,
-                )
-                return
-            try:
-                session_id = int(args)
-            except ValueError:
-                self._safe_send_message(
-                    incoming.chat_id,
-                    "会话 ID 必须是数字。",
-                    incoming.message_thread_id,
-                )
-                return
-            session = self.storage.get_session(session_id, incoming.user_id)
-            if session is None:
-                self._safe_send_message(
-                    incoming.chat_id,
-                    f"找不到会话 #{session_id}。",
-                    incoming.message_thread_id,
-                )
-                return
-            self.storage.set_active_session(
-                incoming.user_id,
-                session_id,
-                chat_id=incoming.chat_id,
-                message_thread_id=incoming.message_thread_id,
-            )
-            self._safe_send_message(
-                incoming.chat_id,
-                f"已切换到会话 #{session.id}\n标题：{session.title}",
+                "这个管理命令已经移除，请直接用 /tbind <绝对路径> 进入目录；如果该目录还没有会话会自动创建，已有则自动切换。",
                 incoming.message_thread_id,
             )
             return
@@ -827,7 +743,7 @@ class TeledexApp:
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前没有活跃会话，请先用 /tnew 或 /tuse。",
+                    "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
                     incoming.message_thread_id,
                 )
                 return
@@ -848,7 +764,7 @@ class TeledexApp:
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前没有活跃会话，请先用 /tnew 或 /tuse。",
+                    "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
                     incoming.message_thread_id,
                 )
                 return
@@ -923,7 +839,7 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前没有活跃会话，请先用 /tnew 创建，或用 /tuse 切换。",
+                "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
                 incoming.message_thread_id,
             )
             return
@@ -1640,7 +1556,7 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前没有活跃会话，请先用 /tnew 创建，或用 /tuse 切换。",
+                "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
                 incoming.message_thread_id,
             )
         return session
@@ -1737,7 +1653,7 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前没有活跃会话，请先用 /tnew 创建，或用 /tuse 切换。",
+                "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
                 incoming.message_thread_id,
             )
             return

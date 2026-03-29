@@ -138,12 +138,10 @@ PYTHONPATH=src python3 -m teledex
 ## Telegram 命令
 
 - `/start`：查看帮助说明
-- `/tnew [标题]`：新建 teledex 会话
-- `/tsessions`：查看会话列表
-- `/tuse <id>`：切换当前会话
-- `/tbind <绝对路径>`：绑定当前会话目录并启动持久 tmux 终端
+- `/tbind <绝对路径>`：绑定目录并启动持久 tmux 终端；若该目录还没有会话会自动创建，已绑定过则自动切换
 - `/tpwd`：查看当前会话目录
 - `/tstop`：停止当前任务
+- `/twipe`：清空当前用户的 teledex 状态
 
 除以上管理命令外，其他 `/命令` 会直接转发给当前 Codex 会话。
 
