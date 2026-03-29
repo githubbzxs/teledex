@@ -137,6 +137,7 @@ class ActiveRun:
     prompt: str
     preview_message_id: int | None = None
     preview_last_edit_at: float = 0.0
+    preview_state: LivePreviewState | None = None
     process_handle: CodexProcessHandle | None = None
     stop_requested: bool = False
 
@@ -444,6 +445,8 @@ class TeledexApp:
         self.runner = CodexRunner(config)
         self.logger = logging.getLogger("teledex")
         self._active_runs: dict[int, ActiveRun] = {}
+        self._queued_runs: dict[int, list[ActiveRun]] = {}
+        self._session_workers: dict[int, threading.Thread] = {}
         self._active_runs_lock = threading.RLock()
         self._update_offset: int | None = None
         self._telegram_rate_limit_lock = threading.RLock()
@@ -707,6 +710,7 @@ class TeledexApp:
                 message_thread_id=incoming.message_thread_id,
             )
             try:
+                self.runner.reset_session_runtime(target_session.id)
                 self.runner.reset_terminal(target_session.id, bound_path)
                 tmux_session_name = self.runner.ensure_terminal(target_session.id, bound_path)
                 action_text = (
@@ -924,6 +928,7 @@ class TeledexApp:
             )
             return
         self.storage.update_session_thread_id(session.id, thread.thread_id)
+        self.runner.reset_session_runtime(session.id)
         self.storage.update_session_status(session.id, "idle")
         title_text = f"\n名称：{thread.name}" if thread.name else ""
         self._safe_send_message(
@@ -960,6 +965,7 @@ class TeledexApp:
         if not new_thread_id:
             raise RuntimeError("fork 后未返回新的 thread_id")
         self.storage.update_session_thread_id(session.id, new_thread_id)
+        self.runner.reset_session_runtime(session.id)
         self._safe_send_message(
             incoming.chat_id,
             f"会话 #{session.id} 已 fork 到新的 Codex 线程：{new_thread_id}",
@@ -1511,10 +1517,13 @@ class TeledexApp:
     def _handle_wipe_command(self, incoming: IncomingMessage) -> None:
         sessions = self.storage.list_sessions(incoming.user_id)
         stopped_runs = 0
+        cancelled_queued_runs = 0
         reset_terminals = 0
         for session in sessions:
             if self._stop_session_run(session.id):
                 stopped_runs += 1
+            cancelled_queued_runs += self._cancel_queued_runs(session.id, "用户已清空状态")
+            self.runner.reset_session_runtime(session.id)
             if not session.bound_path:
                 continue
             try:
@@ -1540,6 +1549,8 @@ class TeledexApp:
         ]
         if stopped_runs > 0:
             lines.append(f"已中断运行中的任务：{stopped_runs}")
+        if cancelled_queued_runs > 0:
+            lines.append(f"已取消排队任务：{cancelled_queued_runs}")
         lines.append("下一条消息会像全新使用一样重新开始。")
         self._safe_send_message(
             incoming.chat_id,
@@ -1576,6 +1587,7 @@ class TeledexApp:
 
     def _reset_session_thread(self, session_id: int) -> None:
         self.storage.clear_session_thread_id(session_id)
+        self.runner.reset_session_runtime(session_id)
 
     def _clear_runtime_artifacts(self) -> int:
         runtime_dir = self.config.state_dir / "runtime"
@@ -1664,15 +1676,11 @@ class TeledexApp:
                 incoming.message_thread_id,
             )
             return
-        if self._is_session_running(session.id):
-            self._safe_send_message(
-                incoming.chat_id,
-                f"会话 #{session.id} 正在执行中，请稍后或先 /tstop。",
-                incoming.message_thread_id,
-            )
-            return
-
-        preview_state = LivePreviewState()
+        queued_ahead = self._queued_run_count(session.id)
+        initial_status = "Thinking"
+        if queued_ahead > 0:
+            initial_status = "Queued" if queued_ahead == 1 else f"Queued ({queued_ahead} ahead)"
+        preview_state = LivePreviewState(initial_status=initial_status)
         preview = self._safe_send_message(
             incoming.chat_id,
             preview_state.render(),
@@ -1694,17 +1702,86 @@ class TeledexApp:
             message_thread_id=incoming.message_thread_id,
             prompt=incoming.text,
             preview_message_id=preview.message_id if preview else None,
+            preview_state=preview_state,
         )
+        worker: threading.Thread | None = None
         with self._active_runs_lock:
-            self._active_runs[session.id] = active_run
+            if session.id not in self._active_runs:
+                self._active_runs[session.id] = active_run
+                current_worker = self._session_workers.get(session.id)
+                if not self._thread_is_alive(current_worker):
+                    worker = threading.Thread(
+                        target=self._run_session_queue,
+                        args=(session.id,),
+                        daemon=True,
+                    )
+                    self._session_workers[session.id] = worker
+            else:
+                self._queued_runs.setdefault(session.id, []).append(active_run)
         self.storage.update_session_status(session.id, "running")
+        if worker is not None:
+            worker.start()
 
-        worker = threading.Thread(
-            target=self._execute_run,
-            args=(session, active_run, preview_state),
-            daemon=True,
+    def _run_session_queue(self, session_id: int) -> None:
+        current_worker = threading.current_thread()
+        try:
+            while True:
+                with self._active_runs_lock:
+                    active_run = self._active_runs.get(session_id)
+                if active_run is None:
+                    break
+                session = self.storage.get_session(session_id)
+                if session is None:
+                    self._cancel_run_without_session(active_run)
+                else:
+                    preview_state = active_run.preview_state or LivePreviewState()
+                    preview_state.update_status("Thinking")
+                    self._execute_run(session, active_run, preview_state)
+
+                next_run: ActiveRun | None = None
+                with self._active_runs_lock:
+                    current_run = self._active_runs.get(session_id)
+                    if current_run is active_run:
+                        self._active_runs.pop(session_id, None)
+                    queue = self._queued_runs.get(session_id)
+                    if queue:
+                        next_run = queue.pop(0)
+                        self._active_runs[session_id] = next_run
+                        if not queue:
+                            self._queued_runs.pop(session_id, None)
+                    else:
+                        self._queued_runs.pop(session_id, None)
+                if next_run is None:
+                    break
+                self.storage.update_session_status(session_id, "running")
+        finally:
+            with self._active_runs_lock:
+                if self._session_workers.get(session_id) is current_worker:
+                    self._session_workers.pop(session_id, None)
+
+    def _cancel_run_without_session(self, active_run: ActiveRun) -> None:
+        preview_state = active_run.preview_state or LivePreviewState(initial_status="Stopped")
+        preview_state.finish("Stopped")
+        self._render_finished_preview(active_run, preview_state)
+        self.storage.finish_run(
+            active_run.run_id,
+            status="stopped",
+            error_message="会话已不存在",
         )
-        worker.start()
+
+    def _thread_is_alive(self, worker: threading.Thread | None) -> bool:
+        if worker is None:
+            return False
+        is_alive = getattr(worker, "is_alive", None)
+        if callable(is_alive):
+            return bool(is_alive())
+        return False
+
+    def _queued_run_count(self, session_id: int) -> int:
+        with self._active_runs_lock:
+            current = 1 if session_id in self._active_runs else 0
+            pending = len(self._queued_runs.get(session_id, []))
+            return current + pending
 
     def _execute_run(
         self,
@@ -1751,6 +1828,8 @@ class TeledexApp:
                         parsed.commentary_id,
                         parsed.commentary_text,
                     )
+                if parsed.commentary_completed_id:
+                    preview_state.clear_commentary(parsed.commentary_completed_id)
                 if parsed.tool_call_id or parsed.tool_command_text or parsed.tool_output_text:
                     preview_state.update_tool_state(
                         parsed.tool_call_id,
@@ -1840,12 +1919,12 @@ class TeledexApp:
                     active_run.process_handle.prompt_file.unlink(missing_ok=True)
                 except OSError:
                     self.logger.warning("清理 Codex 提示词文件失败：%s", active_run.process_handle.prompt_file)
-            with self._active_runs_lock:
-                self._active_runs.pop(session.id, None)
 
     def _is_session_running(self, session_id: int) -> bool:
         with self._active_runs_lock:
-            return session_id in self._active_runs
+            if session_id in self._active_runs:
+                return True
+            return bool(self._queued_runs.get(session_id))
 
     def _stop_session_run(self, session_id: int) -> bool:
         with self._active_runs_lock:
@@ -1857,6 +1936,20 @@ class TeledexApp:
         if handle is not None:
             self.runner.terminate(handle)
         return True
+
+    def _cancel_queued_runs(self, session_id: int, reason: str) -> int:
+        with self._active_runs_lock:
+            queued_runs = self._queued_runs.pop(session_id, [])
+        for active_run in queued_runs:
+            preview_state = active_run.preview_state or LivePreviewState(initial_status="Stopped")
+            preview_state.finish("Stopped")
+            self._render_finished_preview(active_run, preview_state)
+            self.storage.finish_run(
+                active_run.run_id,
+                status="stopped",
+                error_message=reason,
+            )
+        return len(queued_runs)
 
     def _run_preview_loop(
         self,

@@ -9,13 +9,29 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from .config import AppConfig
-from .codex_app_server_exec import AppServerClient
+from .codex_app_server_exec import (
+    AppServerClient,
+    _build_footer_statusline,
+    _build_thread_resume_params,
+    _build_thread_start_params,
+    _build_turn_start_params,
+    _extract_reasoning_effort,
+    _extract_service_tier,
+    _extract_status_line_items,
+    _map_notification,
+    _resolve_thread_binding,
+    _statusline_event_if_changed,
+    _update_status_line_from_binding,
+    _write_status,
+)
 
 _SYNCED_ENV_KEYS_VAR = "__TELEDEX_SYNCED_ENV_KEYS"
 _SHELL_MANAGED_ENV_KEYS = {
@@ -33,6 +49,7 @@ _SHELL_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 @dataclass(slots=True)
 class CodexProcessHandle:
+    session_id: int
     tmux_session_name: str
     tmux_target: str
     output_file: Path
@@ -72,6 +89,22 @@ class CodexThreadSummary:
     path: str | None = None
 
 
+@dataclass(slots=True)
+class _PersistentRuntime:
+    session_id: int
+    cwd: Path
+    tmux_session_name: str
+    client: AppServerClient | None = None
+    bound_thread_id: str | None = None
+    status_line_state: dict[str, Any] | None = None
+    current_turn_id: str | None = None
+    interrupt_requested: bool = False
+    pending_aux_request_ids: set[int] = field(default_factory=set)
+    turn_worker: threading.Thread | None = None
+    state_lock: threading.RLock = field(default_factory=threading.RLock)
+    send_lock: threading.RLock = field(default_factory=threading.RLock)
+
+
 def _normalize_status_text(text: str) -> str:
     normalized = text.strip()
     if not normalized:
@@ -94,6 +127,8 @@ class CodexRunner:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.logger = logging.getLogger("teledex.codex_runner")
+        self._runtime_lock = threading.RLock()
+        self._runtimes: dict[int, _PersistentRuntime] = {}
 
     def ensure_terminal(self, session_id: int, cwd: Path) -> str:
         tmux_session_name = self._tmux_session_name(session_id, cwd)
@@ -151,22 +186,8 @@ class CodexRunner:
 
         tmux_session_name = self.ensure_terminal(session_id, cwd)
         tmux_target = f"{tmux_session_name}:0.0"
-        command = self._build_command(
-            cwd=cwd,
-            thread_id=thread_id,
-            output_file=output_file,
-            event_log_file=event_log_file,
-            status_file=status_file,
-            prompt_file=prompt_file,
-            settings=settings or {},
-        )
-        shell_command = self._build_shell_command(cwd, command)
-        self.logger.info("%s", self._format_start_log_message(cwd, thread_id, settings or {}))
-        self._run_tmux([self.config.tmux_bin, "send-keys", "-t", tmux_target, "C-c"])
-        self._run_tmux(
-            [self.config.tmux_bin, "send-keys", "-t", tmux_target, shell_command, "Enter"]
-        )
-        return CodexProcessHandle(
+        handle = CodexProcessHandle(
+            session_id=session_id,
             tmux_session_name=tmux_session_name,
             tmux_target=tmux_target,
             output_file=output_file,
@@ -174,6 +195,16 @@ class CodexRunner:
             status_file=status_file,
             prompt_file=prompt_file,
         )
+        self.logger.info("%s", self._format_start_log_message(cwd, thread_id, settings or {}))
+        runtime = self._ensure_runtime(session_id, cwd, tmux_session_name)
+        self._start_runtime_turn(
+            runtime,
+            handle,
+            prompt=prompt,
+            thread_id=thread_id,
+            settings=settings or {},
+        )
+        return handle
 
     def wait(
         self,
@@ -323,7 +354,17 @@ class CodexRunner:
         return CodexProcessStatus(exit_code=exit_code, error_message=error_message)
 
     def terminate(self, handle: CodexProcessHandle) -> None:
-        self._run_tmux([self.config.tmux_bin, "send-keys", "-t", handle.tmux_target, "C-c"])
+        runtime = self._get_runtime(handle.session_id)
+        if runtime is None:
+            return
+        self._interrupt_runtime(runtime)
+
+    def reset_session_runtime(self, session_id: int) -> None:
+        with self._runtime_lock:
+            runtime = self._runtimes.pop(session_id, None)
+        if runtime is None:
+            return
+        self._close_runtime(runtime)
 
     def list_threads(self, cwd: Path, limit: int = 10) -> list[CodexThreadSummary]:
         def _request(client: AppServerClient) -> list[CodexThreadSummary]:
@@ -542,7 +583,7 @@ class CodexRunner:
         thread_state = thread_id if thread_id else "new"
         search_state = "on" if self.config.codex_enable_search else "off"
         return (
-            "通过 tmux 启动 Codex 会话："
+            "通过持久 runtime 执行 Codex 会话："
             f" cwd={cwd} thread={thread_state} model={model}"
             f" effort={effort} approval={approval}"
             f" sandbox={sandbox} collab={collaboration}"
@@ -686,6 +727,373 @@ class CodexRunner:
             return callback(client)
         finally:
             client.close()
+
+    def _ensure_runtime(
+        self,
+        session_id: int,
+        cwd: Path,
+        tmux_session_name: str,
+    ) -> _PersistentRuntime:
+        resolved_cwd = cwd.expanduser().resolve()
+        with self._runtime_lock:
+            runtime = self._runtimes.get(session_id)
+            if runtime is not None and runtime.cwd != resolved_cwd:
+                self._runtimes.pop(session_id, None)
+                self._close_runtime(runtime)
+                runtime = None
+            if runtime is None:
+                runtime = _PersistentRuntime(
+                    session_id=session_id,
+                    cwd=resolved_cwd,
+                    tmux_session_name=tmux_session_name,
+                )
+                self._runtimes[session_id] = runtime
+            else:
+                runtime.tmux_session_name = tmux_session_name
+            return runtime
+
+    def _get_runtime(self, session_id: int) -> _PersistentRuntime | None:
+        with self._runtime_lock:
+            return self._runtimes.get(session_id)
+
+    def _close_runtime(self, runtime: _PersistentRuntime) -> None:
+        with runtime.state_lock:
+            client = runtime.client
+            runtime.client = None
+            runtime.bound_thread_id = None
+            runtime.status_line_state = None
+            runtime.current_turn_id = None
+            runtime.interrupt_requested = False
+            runtime.pending_aux_request_ids.clear()
+        if client is not None:
+            client.close()
+
+    def _start_runtime_turn(
+        self,
+        runtime: _PersistentRuntime,
+        handle: CodexProcessHandle,
+        *,
+        prompt: str,
+        thread_id: str | None,
+        settings: dict[str, Any],
+    ) -> None:
+        with runtime.state_lock:
+            if runtime.turn_worker is not None and runtime.turn_worker.is_alive():
+                raise RuntimeError(f"会话 #{runtime.session_id} 当前已有运行中的 Codex turn")
+            runtime.current_turn_id = None
+            runtime.interrupt_requested = False
+            runtime.pending_aux_request_ids.clear()
+            worker = threading.Thread(
+                target=self._run_runtime_turn,
+                args=(runtime, handle, prompt, thread_id, settings),
+                daemon=True,
+            )
+            runtime.turn_worker = worker
+        worker.start()
+
+    def _run_runtime_turn(
+        self,
+        runtime: _PersistentRuntime,
+        handle: CodexProcessHandle,
+        prompt: str,
+        thread_id: str | None,
+        settings: dict[str, Any],
+    ) -> None:
+        event_writer = handle.event_log_file.open("a", encoding="utf-8")
+        final_response = ""
+        fallback_agent_response = ""
+        latest_agent_message_by_id: dict[str, dict[str, Any]] = {}
+        latest_plan_text_by_id: dict[str, str] = {}
+        reasoning_summary_by_id: dict[str, dict[int, str]] = {}
+        command_output_by_id: dict[str, str] = {}
+        interrupted = False
+        failed_message: str | None = None
+        try:
+            client, bound_thread_id = self._ensure_runtime_binding(runtime, thread_id, settings)
+            self._write_runtime_event(
+                {
+                    "type": "thread.started",
+                    "thread_id": bound_thread_id,
+                    "footer_statusline": self._runtime_footer_statusline(runtime),
+                },
+                event_writer,
+            )
+
+            args = self._runtime_args(runtime.cwd, settings, thread_id=bound_thread_id)
+            request_id = self._send_client_request(
+                runtime,
+                client,
+                "turn/start",
+                _build_turn_start_params(
+                    bound_thread_id,
+                    prompt,
+                    args,
+                    self._runtime_model(runtime),
+                    _extract_reasoning_effort(runtime.status_line_state or {}),
+                ),
+            )
+            request_acked = False
+            turn_completed = False
+
+            while not (request_acked and turn_completed):
+                message = client.read_message()
+                kind = message["kind"]
+                if kind == "response":
+                    message_id = int(message["id"])
+                    if message_id == request_id:
+                        request_acked = True
+                        result = message["result"]
+                        turn = result.get("turn") if isinstance(result, dict) else None
+                        if isinstance(turn, dict):
+                            turn_id = str(turn.get("id") or "").strip() or None
+                            if turn_id:
+                                with runtime.state_lock:
+                                    runtime.current_turn_id = turn_id
+                                    interrupt_requested = runtime.interrupt_requested
+                                if interrupt_requested:
+                                    self._send_turn_interrupt(runtime, client)
+                        continue
+                    if self._consume_aux_request(runtime, message_id):
+                        continue
+                if kind == "error":
+                    message_id = int(message["id"])
+                    if message_id == request_id:
+                        details = message.get("data")
+                        if details is None:
+                            raise RuntimeError(f"turn/start 失败：{message['message']}")
+                        raise RuntimeError(
+                            f"turn/start 失败：{message['message']} "
+                            f"({json.dumps(details, ensure_ascii=False)})"
+                        )
+                    if self._consume_aux_request(runtime, message_id):
+                        continue
+                if kind == "request":
+                    client.reject_server_request(message["id"], message["method"])
+                    continue
+                if kind != "notification":
+                    continue
+
+                event = _map_notification(
+                    message["method"],
+                    message.get("params") or {},
+                    latest_agent_message_by_id,
+                    latest_plan_text_by_id,
+                    reasoning_summary_by_id,
+                    command_output_by_id,
+                    runtime.status_line_state or {},
+                )
+                if event is None:
+                    continue
+                self._write_runtime_event(event, event_writer)
+
+                item = event.get("item")
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "agent_message"
+                    and isinstance(item.get("text"), str)
+                ):
+                    phase = str(item.get("phase") or "").strip()
+                    if event["type"] == "item.completed":
+                        if phase == "final_answer":
+                            final_response = item["text"]
+                        elif phase != "commentary":
+                            fallback_agent_response = item["text"]
+
+                if event["type"] in {"turn.completed", "turn.failed", "turn.interrupted"}:
+                    if event["type"] == "turn.interrupted":
+                        interrupted = True
+                    elif event["type"] == "turn.failed":
+                        failed_message = str(event.get("message") or "执行失败").strip() or "执行失败"
+                    turn_completed = True
+
+            handle.output_file.write_text(
+                final_response or fallback_agent_response,
+                encoding="utf-8",
+            )
+            if interrupted:
+                _write_status(handle.status_file, exit_code=130, error_message="任务已中断")
+            elif failed_message:
+                _write_status(handle.status_file, exit_code=1, error_message=failed_message)
+            else:
+                _write_status(handle.status_file, exit_code=0)
+        except Exception as exc:
+            self.logger.exception("持久 runtime 执行会话 #%s 失败", runtime.session_id)
+            self._write_runtime_event({"type": "error", "message": str(exc)}, event_writer)
+            _write_status(handle.status_file, exit_code=1, error_message=str(exc))
+            self._close_runtime(runtime)
+        finally:
+            with runtime.state_lock:
+                runtime.current_turn_id = None
+                runtime.interrupt_requested = False
+                runtime.pending_aux_request_ids.clear()
+                runtime.turn_worker = None
+            event_writer.close()
+
+    def _ensure_runtime_binding(
+        self,
+        runtime: _PersistentRuntime,
+        requested_thread_id: str | None,
+        settings: dict[str, Any],
+    ) -> tuple[AppServerClient, str]:
+        with runtime.state_lock:
+            client = runtime.client
+            bound_thread_id = runtime.bound_thread_id
+            status_line_state = runtime.status_line_state
+
+        if client is None:
+            client = AppServerClient.start(self.config.codex_bin, runtime.cwd)
+            config_read: dict[str, Any]
+            try:
+                config_read = client.request_simple(
+                    "config/read",
+                    {
+                        "cwd": str(runtime.cwd),
+                        "includeLayers": False,
+                    },
+                )
+            except RuntimeError:
+                config_read = {}
+            config = config_read.get("config") if isinstance(config_read, dict) else {}
+            status_line_state = {
+                "cwd": runtime.cwd,
+                "model": (
+                    str((config or {}).get("model") or "").strip()
+                    or str(settings.get("model") or self.config.codex_model or "").strip()
+                    or "loading"
+                ),
+                "reasoning_effort": (
+                    str(settings.get("reasoning_effort") or "").strip()
+                    or _extract_reasoning_effort(config)
+                ),
+                "service_tier": (
+                    str(settings.get("service_tier") or "").strip() or _extract_service_tier(config)
+                ),
+                "status_line_items": _extract_status_line_items(config),
+                "context_remaining_percent": 100,
+                "last_emitted_line": "",
+            }
+            with runtime.state_lock:
+                runtime.client = client
+                runtime.status_line_state = status_line_state
+                bound_thread_id = runtime.bound_thread_id
+
+        if requested_thread_id and bound_thread_id and requested_thread_id != bound_thread_id:
+            self._close_runtime(runtime)
+            return self._ensure_runtime_binding(runtime, requested_thread_id, settings)
+
+        if bound_thread_id:
+            return client, bound_thread_id
+
+        args = self._runtime_args(runtime.cwd, settings, thread_id=requested_thread_id)
+        if requested_thread_id:
+            binding = client.request_simple(
+                "thread/resume",
+                _build_thread_resume_params(args),
+            )
+        else:
+            binding = client.request_simple(
+                "thread/start",
+                _build_thread_start_params(args),
+            )
+        status_line_state = runtime.status_line_state or {}
+        _update_status_line_from_binding(status_line_state, binding)
+        bound_thread_id, thread_cwd = _resolve_thread_binding(binding)
+        if thread_cwd and Path(thread_cwd).resolve() != runtime.cwd:
+            raise RuntimeError(f"Codex 会话目录不一致：期望 {runtime.cwd}，实际 {thread_cwd}")
+        _statusline_event_if_changed(status_line_state)
+        with runtime.state_lock:
+            runtime.client = client
+            runtime.status_line_state = status_line_state
+            runtime.bound_thread_id = bound_thread_id
+        return client, bound_thread_id
+
+    def _interrupt_runtime(self, runtime: _PersistentRuntime) -> None:
+        with runtime.state_lock:
+            client = runtime.client
+            worker = runtime.turn_worker
+            runtime.interrupt_requested = True
+            turn_id = runtime.current_turn_id
+            thread_id = runtime.bound_thread_id
+        if client is None or worker is None or not worker.is_alive() or not turn_id or not thread_id:
+            return
+        self._send_turn_interrupt(runtime, client)
+
+    def _send_turn_interrupt(
+        self,
+        runtime: _PersistentRuntime,
+        client: AppServerClient,
+    ) -> None:
+        with runtime.state_lock:
+            thread_id = runtime.bound_thread_id
+            turn_id = runtime.current_turn_id
+        if not thread_id or not turn_id:
+            return
+        request_id = self._send_client_request(
+            runtime,
+            client,
+            "turn/interrupt",
+            {
+                "threadId": thread_id,
+                "turnId": turn_id,
+            },
+        )
+        with runtime.state_lock:
+            runtime.pending_aux_request_ids.add(request_id)
+
+    def _send_client_request(
+        self,
+        runtime: _PersistentRuntime,
+        client: AppServerClient,
+        method: str,
+        params: dict[str, Any],
+    ) -> int:
+        with runtime.send_lock:
+            return client.send_request(method, params)
+
+    def _consume_aux_request(self, runtime: _PersistentRuntime, request_id: int) -> bool:
+        with runtime.state_lock:
+            if request_id not in runtime.pending_aux_request_ids:
+                return False
+            runtime.pending_aux_request_ids.discard(request_id)
+            return True
+
+    def _runtime_args(
+        self,
+        cwd: Path,
+        settings: dict[str, Any],
+        *,
+        thread_id: str | None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            cwd=str(cwd),
+            thread_id=thread_id,
+            exec_mode=self.config.codex_exec_mode,
+            model=settings.get("model") or self.config.codex_model,
+            reasoning_effort=settings.get("reasoning_effort"),
+            service_tier=settings.get("service_tier"),
+            personality=settings.get("personality"),
+            approval_policy=settings.get("approval_policy"),
+            sandbox_mode=settings.get("sandbox_mode"),
+            collaboration_mode=settings.get("collaboration_mode"),
+            search=self.config.codex_enable_search,
+            persist_extended_history=self.config.codex_persist_extended_history,
+        )
+
+    def _runtime_model(self, runtime: _PersistentRuntime) -> str | None:
+        status_line_state = runtime.status_line_state or {}
+        model = str(status_line_state.get("model") or "").strip()
+        return model or None
+
+    def _runtime_footer_statusline(self, runtime: _PersistentRuntime) -> str | None:
+        status_line_state = runtime.status_line_state or {}
+        line = _build_footer_statusline(status_line_state)
+        return line or None
+
+    def _write_runtime_event(self, payload: dict[str, Any], event_writer) -> None:
+        line = json.dumps(payload, ensure_ascii=False)
+        event_writer.write(line)
+        event_writer.write("\n")
+        event_writer.flush()
 
     def _thread_settings_args(self, settings: dict[str, Any]) -> dict[str, Any]:
         params: dict[str, Any] = {}

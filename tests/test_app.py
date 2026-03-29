@@ -483,6 +483,53 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
+    def test_handle_prompt_queues_follow_up_message_in_same_session(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "会话一")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        self.app._active_runs[session.id] = ActiveRun(
+            run_id=1,
+            session_id=session.id,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="第一条消息",
+            preview_message_id=111,
+        )
+
+        calls: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            calls.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=654,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._handle_prompt(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="第二条消息",
+                message_id=322,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(calls, ["○ Queued (0m)"])
+        self.assertIn(session.id, self.app._active_runs)
+        self.assertEqual(len(self.app._queued_runs.get(session.id, [])), 1)
+        self.assertEqual(self.app._queued_runs[session.id][0].prompt, "第二条消息")
+
     def test_handle_prompt_requires_bound_session_in_new_chat_context(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "会话一")
