@@ -483,11 +483,12 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
-    def test_handle_prompt_queues_follow_up_message_in_same_session(self) -> None:
+    def test_handle_prompt_interrupts_current_run_for_follow_up_message_in_same_session(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "会话一")
         self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
         self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        current_handle = object()
         self.app._active_runs[session.id] = ActiveRun(
             run_id=1,
             session_id=session.id,
@@ -496,9 +497,11 @@ class AppMessagingTestCase(unittest.TestCase):
             message_thread_id=9,
             prompt="第一条消息",
             preview_message_id=111,
+            process_handle=current_handle,  # type: ignore[arg-type]
         )
 
         calls: list[str] = []
+        terminated_handles: list[object] = []
 
         def fake_send_message(
             chat_id: int,
@@ -515,6 +518,7 @@ class AppMessagingTestCase(unittest.TestCase):
             )
 
         self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app.runner.terminate = terminated_handles.append  # type: ignore[method-assign]
         self.app._handle_prompt(
             IncomingMessage(
                 chat_id=100,
@@ -525,10 +529,13 @@ class AppMessagingTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(calls, ["○ Queued (0m)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session.id, self.app._active_runs)
+        self.assertTrue(self.app._active_runs[session.id].stop_requested)
+        self.assertTrue(self.app._active_runs[session.id].superseded_by_follow_up)
         self.assertEqual(len(self.app._queued_runs.get(session.id, [])), 1)
         self.assertEqual(self.app._queued_runs[session.id][0].prompt, "第二条消息")
+        self.assertEqual(terminated_handles, [current_handle])
 
     def test_handle_prompt_requires_bound_session_in_new_chat_context(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)

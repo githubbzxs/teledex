@@ -140,6 +140,7 @@ class ActiveRun:
     preview_state: LivePreviewState | None = None
     process_handle: CodexProcessHandle | None = None
     stop_requested: bool = False
+    superseded_by_follow_up: bool = False
 
 
 class LivePreviewState:
@@ -1688,11 +1689,7 @@ class TeledexApp:
                 incoming.message_thread_id,
             )
             return
-        queued_ahead = self._queued_run_count(session.id)
-        initial_status = "Thinking"
-        if queued_ahead > 0:
-            initial_status = "Queued" if queued_ahead == 1 else f"Queued ({queued_ahead} ahead)"
-        preview_state = LivePreviewState(initial_status=initial_status)
+        preview_state = LivePreviewState(initial_status="Thinking")
         preview = self._safe_send_message(
             incoming.chat_id,
             preview_state.render(),
@@ -1717,8 +1714,11 @@ class TeledexApp:
             preview_state=preview_state,
         )
         worker: threading.Thread | None = None
+        interrupted_handle: CodexProcessHandle | None = None
+        replaced_runs: list[ActiveRun] = []
         with self._active_runs_lock:
-            if session.id not in self._active_runs:
+            current_run = self._active_runs.get(session.id)
+            if current_run is None:
                 self._active_runs[session.id] = active_run
                 current_worker = self._session_workers.get(session.id)
                 if not self._thread_is_alive(current_worker):
@@ -1729,8 +1729,16 @@ class TeledexApp:
                     )
                     self._session_workers[session.id] = worker
             else:
-                self._queued_runs.setdefault(session.id, []).append(active_run)
+                current_run.stop_requested = True
+                current_run.superseded_by_follow_up = True
+                interrupted_handle = current_run.process_handle
+                replaced_runs = self._queued_runs.pop(session.id, [])
+                self._queued_runs[session.id] = [active_run]
         self.storage.update_session_status(session.id, "running")
+        for replaced_run in replaced_runs:
+            self._finish_pending_run_as_stopped(replaced_run, "后续消息已接管当前任务")
+        if interrupted_handle is not None:
+            self.runner.terminate(interrupted_handle)
         if worker is not None:
             worker.start()
 
@@ -1788,12 +1796,6 @@ class TeledexApp:
         if callable(is_alive):
             return bool(is_alive())
         return False
-
-    def _queued_run_count(self, session_id: int) -> int:
-        with self._active_runs_lock:
-            current = 1 if session_id in self._active_runs else 0
-            pending = len(self._queued_runs.get(session_id, []))
-            return current + pending
 
     def _execute_run(
         self,
@@ -1885,15 +1887,17 @@ class TeledexApp:
             preview_state.finish("Stopped")
             self._stop_preview_loop(preview_stop_event, preview_worker)
             self._render_finished_preview(active_run, preview_state)
-            self._safe_send_message(
-                active_run.chat_id,
-                f"会话 #{session.id} 的任务已停止。",
-                active_run.message_thread_id,
-            )
+            stop_reason = "后续消息已接管当前任务" if active_run.superseded_by_follow_up else "用户主动停止"
+            if not active_run.superseded_by_follow_up:
+                self._safe_send_message(
+                    active_run.chat_id,
+                    f"会话 #{session.id} 的任务已停止。",
+                    active_run.message_thread_id,
+                )
             self.storage.finish_run(
                 active_run.run_id,
                 status="stopped",
-                error_message="用户主动停止",
+                error_message=stop_reason,
             )
             self.storage.update_session_status(session.id, "idle")
         except Exception as exc:
@@ -1953,15 +1957,18 @@ class TeledexApp:
         with self._active_runs_lock:
             queued_runs = self._queued_runs.pop(session_id, [])
         for active_run in queued_runs:
-            preview_state = active_run.preview_state or LivePreviewState(initial_status="Stopped")
-            preview_state.finish("Stopped")
-            self._render_finished_preview(active_run, preview_state)
-            self.storage.finish_run(
-                active_run.run_id,
-                status="stopped",
-                error_message=reason,
-            )
+            self._finish_pending_run_as_stopped(active_run, reason)
         return len(queued_runs)
+
+    def _finish_pending_run_as_stopped(self, active_run: ActiveRun, reason: str) -> None:
+        preview_state = active_run.preview_state or LivePreviewState(initial_status="Stopped")
+        preview_state.finish("Stopped")
+        self._render_finished_preview(active_run, preview_state)
+        self.storage.finish_run(
+            active_run.run_id,
+            status="stopped",
+            error_message=reason,
+        )
 
     def _run_preview_loop(
         self,
