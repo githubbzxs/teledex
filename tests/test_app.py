@@ -57,6 +57,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "测试会话")
         self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
 
         calls: list[dict[str, object]] = []
 
@@ -439,7 +440,7 @@ class AppMessagingTestCase(unittest.TestCase):
         session_2 = self.app.storage.create_session(1, "会话二")
         self.app.storage.bind_session_path(session_1.id, 1, self.temp_dir.name)
         self.app.storage.bind_session_path(session_2.id, 1, self.temp_dir.name)
-        self.app.storage.set_active_session(1, session_2.id)
+        self.app.storage.set_active_session(1, session_2.id, chat_id=100, message_thread_id=9)
         self.app._active_runs[session_1.id] = ActiveRun(
             run_id=1,
             session_id=session_1.id,
@@ -481,6 +482,43 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
+
+    def test_handle_prompt_requires_bound_session_in_new_chat_context(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "会话一")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+
+        calls: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            calls.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=655,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        incoming = IncomingMessage(
+            chat_id=100,
+            user_id=1,
+            text="这是一个全新聊天里的第一句话",
+            message_id=322,
+            message_thread_id=10,
+        )
+
+        with patch("teledex.app.threading.Thread", _FakeThread):
+            self.app._handle_prompt(incoming)
+
+        self.assertEqual(calls, ["当前还没有绑定目录，请先用 /tbind <绝对路径>。"])
+        self.assertNotIn(session.id, self.app._active_runs)
 
     def test_legacy_session_commands_are_redirected_to_tbind(self) -> None:
         calls: list[str] = []

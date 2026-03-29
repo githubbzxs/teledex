@@ -294,6 +294,7 @@ class Storage:
                 ).fetchone()
             if row is not None and row["active_session_id"] is not None:
                 return self.get_session(int(row["active_session_id"]), user_id)
+            return None
 
         user = self.get_user(user_id)
         if user is None or user.active_session_id is None:

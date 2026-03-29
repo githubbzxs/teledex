@@ -48,6 +48,21 @@ class StorageTestCase(unittest.TestCase):
         self.assertEqual(active_a.id, session_a.id)
         self.assertEqual(active_b.id, session_b.id)
 
+    def test_scoped_lookup_does_not_fallback_to_user_level_active_session(self) -> None:
+        self.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session_a = self.storage.create_session(1, "会话 A")
+        session_b = self.storage.create_session(1, "会话 B")
+
+        self.storage.set_active_session(1, session_a.id, chat_id=100, message_thread_id=9)
+        self.storage.set_active_session(1, session_b.id)
+
+        scoped_missing = self.storage.get_active_session(1, chat_id=100, message_thread_id=10)
+        global_active = self.storage.get_active_session(1)
+
+        self.assertIsNone(scoped_missing)
+        assert global_active is not None
+        self.assertEqual(global_active.id, session_b.id)
+
     def test_bind_path_and_thread_id(self) -> None:
         self.storage.ensure_user(2, chat_id=101, message_thread_id=None)
         session = self.storage.create_session(2, "会话")
