@@ -95,6 +95,17 @@ class TelegramClient:
             payload["message_thread_id"] = message_thread_id
         self._call("editMessageText", payload)
 
+    def delete_message(
+        self,
+        chat_id: int,
+        message_id: int,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        }
+        self._call("deleteMessage", payload)
+
     def send_chat_action(
         self,
         chat_id: int,

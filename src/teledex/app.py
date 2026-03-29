@@ -1894,10 +1894,7 @@ class TeledexApp:
             if not final_message:
                 final_message = "已完成，但没有捕获到最终回复。"
 
-            preview_state.update_stream_text(final_message)
-            preview_state.update_status("Thinking")
             self._stop_preview_loop(preview_stop_event, preview_worker)
-            self._drain_preview_stream(active_run, preview_state)
             self._send_run_result(active_run, final_message, preview_state)
             self.storage.finish_run(
                 active_run.run_id,
@@ -2160,47 +2157,24 @@ class TeledexApp:
         text: str,
         preview_state: LivePreviewState | None = None,
     ) -> None:
-        preview_updated = False
-        if preview_state is not None:
-            preview_state.update_stream_text(text)
-            preview_state.complete()
-            if self._render_finished_preview(active_run, preview_state):
-                preview_updated = True
-        if not preview_updated:
-            inline_text, parse_mode = self._build_inline_result(text)
-            if self._edit_preview_message(
-                active_run,
-                inline_text,
-                parse_mode=parse_mode,
-                respect_local_interval=False,
-            ):
-                preview_updated = True
-            else:
-                self._safe_send_message(
-                    active_run.chat_id,
-                    inline_text,
-                    active_run.message_thread_id,
-                    parse_mode=parse_mode,
-                    defer_on_rate_limit=True,
-                )
-                return
-        self._send_completion_notice(active_run)
-
-    def _send_completion_notice(self, active_run: ActiveRun) -> None:
+        del preview_state
+        self._safe_delete_preview_message(active_run, defer_on_rate_limit=True)
+        final_text, parse_mode = self._build_final_result_message(text)
         self._safe_send_message(
             active_run.chat_id,
-            "已完成",
+            final_text,
             active_run.message_thread_id,
+            parse_mode=parse_mode,
             defer_on_rate_limit=True,
         )
 
-    def _build_inline_result(self, text: str) -> tuple[str, str | None]:
-        plain_limit = 3400
+    def _build_final_result_message(self, text: str) -> tuple[str, str | None]:
+        plain_limit = 3500
         cleaned = text.strip()
         html_text = markdown_to_telegram_html(cleaned)
         if html_text and len(html_text) <= 3500:
             return html_text, "HTML"
-        plain_text = f"Completed\n\n{cleaned}" if cleaned else "Completed"
+        plain_text = cleaned or "已完成，但没有可展示的最终回复。"
         if len(plain_text) <= plain_limit:
             return plain_text, None
         suffix = "\n\n[Truncated for length]"
@@ -2249,6 +2223,81 @@ class TeledexApp:
             self.logger.warning("Telegram chat action 触发限流，%s 秒内暂停发送。", delay)
         except TelegramApiError:
             self.logger.debug("发送 Telegram chat action 失败", exc_info=True)
+
+    def _schedule_delayed_preview_delete(
+        self,
+        active_run: ActiveRun,
+        attempts_remaining: int = 2,
+    ) -> None:
+        worker = threading.Thread(
+            target=self._delayed_delete_preview_message,
+            args=(active_run, attempts_remaining),
+            daemon=True,
+        )
+        worker.start()
+
+    def _delayed_delete_preview_message(
+        self,
+        active_run: ActiveRun,
+        attempts_remaining: int,
+    ) -> None:
+        if attempts_remaining <= 0:
+            self.logger.error("Telegram 预览消息删除重试次数已耗尽。")
+            return
+        if not self._wait_for_telegram_rate_limit(max_wait_seconds=900):
+            self.logger.error("Telegram 限流窗口过长，放弃延迟删除预览消息。")
+            return
+        preview_message_id = active_run.preview_message_id
+        if preview_message_id is None:
+            return
+        try:
+            self.telegram.delete_message(
+                chat_id=active_run.chat_id,
+                message_id=preview_message_id,
+            )
+            active_run.preview_message_id = None
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning(
+                "Telegram 延迟删除预览消息仍被限流，%s 秒后继续重试，剩余 %s 次。",
+                delay,
+                attempts_remaining - 1,
+            )
+            self._schedule_delayed_preview_delete(
+                active_run,
+                attempts_remaining=attempts_remaining - 1,
+            )
+        except TelegramApiError:
+            self.logger.exception("延迟删除 Telegram 预览消息失败")
+
+    def _safe_delete_preview_message(
+        self,
+        active_run: ActiveRun,
+        defer_on_rate_limit: bool = False,
+    ) -> bool:
+        preview_message_id = active_run.preview_message_id
+        if preview_message_id is None:
+            return True
+        if self._telegram_rate_limit_remaining_seconds() > 0:
+            if defer_on_rate_limit:
+                self._schedule_delayed_preview_delete(active_run)
+            return False
+        try:
+            self.telegram.delete_message(
+                chat_id=active_run.chat_id,
+                message_id=preview_message_id,
+            )
+            active_run.preview_message_id = None
+            return True
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning("Telegram 删除预览消息触发限流，%s 秒内暂停发送。", delay)
+            if defer_on_rate_limit:
+                self._schedule_delayed_preview_delete(active_run)
+            return False
+        except TelegramApiError:
+            self.logger.exception("删除 Telegram 预览消息失败")
+            return False
 
     def _safe_send_message(
         self,

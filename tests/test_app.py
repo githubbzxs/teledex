@@ -15,7 +15,7 @@ from teledex.app import (
     _normalize_preview_interval,
 )
 from teledex.config import AppConfig
-from teledex.telegram_api import TelegramMessage, TelegramRateLimitError
+from teledex.telegram_api import TelegramApiError, TelegramMessage, TelegramRateLimitError
 
 
 class _FakeThread:
@@ -99,7 +99,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIsNone(calls[0]["reply_to_message_id"])
         self.assertEqual(str(calls[0]["text"]), "○ Thinking (0m)")
 
-    def test_send_run_result_never_replies_to_preview_message(self) -> None:
+    def test_send_run_result_deletes_preview_and_sends_new_final_message(self) -> None:
         active_run = ActiveRun(
             run_id=1,
             session_id=1,
@@ -109,98 +109,16 @@ class AppMessagingTestCase(unittest.TestCase):
             prompt="任务",
             preview_message_id=456,
         )
-        calls: list[dict[str, object]] = []
+        deleted: list[dict[str, int]] = []
+        sent: list[dict[str, object]] = []
 
-        def fake_edit_preview_message(
-            active_run: ActiveRun,
-            text: str,
-            parse_mode: str | None = None,
-            respect_local_interval: bool = True,
-        ) -> bool:
-            calls.append(
+        def fake_delete_message(**kwargs) -> None:
+            deleted.append(
                 {
-                    "chat_id": active_run.chat_id,
-                    "text": text,
-                    "message_thread_id": active_run.message_thread_id,
-                    "parse_mode": parse_mode,
+                    "chat_id": int(kwargs["chat_id"]),
+                    "message_id": int(kwargs["message_id"]),
                 }
             )
-            return True
-
-        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
-        self.app._safe_send_message = lambda *args, **kwargs: None  # type: ignore[method-assign]
-        self.app._send_run_result(active_run, "最终回复")
-
-        self.assertEqual(len(calls), 1)
-        self.assertIn("最终回复", str(calls[0]["text"]))
-        self.assertEqual(calls[0]["parse_mode"], "HTML")
-
-    def test_send_run_result_keeps_footer_statusline_when_preview_state_is_present(self) -> None:
-        active_run = ActiveRun(
-            run_id=1,
-            session_id=1,
-            user_id=1,
-            chat_id=100,
-            message_thread_id=9,
-            prompt="任务",
-            preview_message_id=456,
-        )
-        preview = LivePreviewState()
-        preview.update_footer_statusline("gpt-5.4 default · 98% left · ~/teledex")
-        calls: list[dict[str, object]] = []
-
-        def fake_edit_preview_message(
-            active_run: ActiveRun,
-            text: str,
-            parse_mode: str | None = None,
-            respect_local_interval: bool = True,
-        ) -> bool:
-            calls.append(
-                {
-                    "chat_id": active_run.chat_id,
-                    "text": text,
-                    "message_thread_id": active_run.message_thread_id,
-                    "parse_mode": parse_mode,
-                }
-            )
-            return True
-
-        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
-        self.app._safe_send_message = lambda *args, **kwargs: None  # type: ignore[method-assign]
-        self.app._send_run_result(active_run, "最终回复", preview)
-
-        self.assertEqual(len(calls), 1)
-        self.assertIn("Completed", str(calls[0]["text"]))
-        self.assertIn("最终回复", str(calls[0]["text"]))
-        self.assertIn("gpt-5.4 default · 98% left · ~/teledex", str(calls[0]["text"]))
-        self.assertEqual(calls[0]["parse_mode"], "HTML")
-
-    def test_send_run_result_sends_completion_notice_after_preview_edit(self) -> None:
-        active_run = ActiveRun(
-            run_id=1,
-            session_id=1,
-            user_id=1,
-            chat_id=100,
-            message_thread_id=9,
-            prompt="任务",
-            preview_message_id=456,
-        )
-        edit_calls: list[dict[str, object]] = []
-        notice_calls: list[dict[str, object]] = []
-
-        def fake_edit_preview_message(
-            active_run: ActiveRun,
-            text: str,
-            parse_mode: str | None = None,
-            respect_local_interval: bool = True,
-        ) -> bool:
-            edit_calls.append(
-                {
-                    "text": text,
-                    "parse_mode": parse_mode,
-                }
-            )
-            return True
 
         def fake_send_message(
             chat_id: int,
@@ -210,7 +128,7 @@ class AppMessagingTestCase(unittest.TestCase):
             parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
         ) -> TelegramMessage:
-            notice_calls.append(
+            sent.append(
                 {
                     "chat_id": chat_id,
                     "text": text,
@@ -225,26 +143,18 @@ class AppMessagingTestCase(unittest.TestCase):
                 message_thread_id=message_thread_id,
             )
 
-        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
+        self.app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
         self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
-
         self.app._send_run_result(active_run, "最终回复")
 
-        self.assertEqual(len(edit_calls), 1)
-        self.assertEqual(
-            notice_calls,
-            [
-                {
-                    "chat_id": 100,
-                    "text": "已完成",
-                    "message_thread_id": 9,
-                    "reply_to_message_id": None,
-                    "parse_mode": None,
-                }
-            ],
-        )
+        self.assertEqual(deleted, [{"chat_id": 100, "message_id": 456}])
+        self.assertEqual(active_run.preview_message_id, None)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("最终回复", str(sent[0]["text"]))
+        self.assertEqual(sent[0]["parse_mode"], "HTML")
+        self.assertIsNone(sent[0]["reply_to_message_id"])
 
-    def test_send_run_result_does_not_duplicate_notice_when_falling_back_to_new_message(self) -> None:
+    def test_send_run_result_ignores_preview_state_footer_and_only_sends_final_message(self) -> None:
         active_run = ActiveRun(
             run_id=1,
             session_id=1,
@@ -254,15 +164,11 @@ class AppMessagingTestCase(unittest.TestCase):
             prompt="任务",
             preview_message_id=456,
         )
-        calls: list[dict[str, object]] = []
+        preview = LivePreviewState()
+        preview.update_footer_statusline("gpt-5.4 default · 98% left · ~/teledex")
+        sent: list[dict[str, object]] = []
 
-        def fake_edit_preview_message(
-            active_run: ActiveRun,
-            text: str,
-            parse_mode: str | None = None,
-            respect_local_interval: bool = True,
-        ) -> bool:
-            return False
+        self.app.telegram.delete_message = lambda **kwargs: None  # type: ignore[method-assign]
 
         def fake_send_message(
             chat_id: int,
@@ -272,7 +178,53 @@ class AppMessagingTestCase(unittest.TestCase):
             parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
         ) -> TelegramMessage:
-            calls.append(
+            sent.append(
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "message_thread_id": message_thread_id,
+                    "parse_mode": parse_mode,
+                }
+            )
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=789,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._send_run_result(active_run, "最终回复", preview)
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("最终回复", str(sent[0]["text"]))
+        self.assertNotIn("Completed", str(sent[0]["text"]))
+        self.assertNotIn("gpt-5.4 default · 98% left · ~/teledex", str(sent[0]["text"]))
+        self.assertEqual(sent[0]["parse_mode"], "HTML")
+
+    def test_send_run_result_still_sends_final_message_when_preview_delete_fails(self) -> None:
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        sent: list[dict[str, object]] = []
+
+        def fake_delete_message(**kwargs) -> None:
+            raise TelegramApiError("删除失败")
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+            defer_on_rate_limit: bool = False,
+        ) -> TelegramMessage:
+            sent.append(
                 {
                     "chat_id": chat_id,
                     "text": text,
@@ -283,17 +235,78 @@ class AppMessagingTestCase(unittest.TestCase):
             )
             return TelegramMessage(
                 chat_id=chat_id,
-                message_id=790,
+                message_id=789,
                 message_thread_id=message_thread_id,
             )
 
-        self.app._edit_preview_message = fake_edit_preview_message  # type: ignore[method-assign]
+        self.app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
         self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
 
         self.app._send_run_result(active_run, "最终回复")
 
-        self.assertEqual(len(calls), 1)
-        self.assertIn("最终回复", str(calls[0]["text"]))
+        self.assertEqual(len(sent), 1)
+        self.assertIn("最终回复", str(sent[0]["text"]))
+        self.assertEqual(active_run.preview_message_id, 456)
+
+    def test_send_run_result_schedules_preview_delete_retry_when_rate_limited(self) -> None:
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        scheduled: list[dict[str, object]] = []
+        sent: list[str] = []
+
+        def fake_delete_message(**kwargs) -> None:
+            raise TelegramRateLimitError("限流", retry_after_seconds=12)
+
+        def fake_schedule_delayed_preview_delete(
+            active_run: ActiveRun,
+            attempts_remaining: int = 2,
+        ) -> None:
+            scheduled.append(
+                {
+                    "run_id": active_run.run_id,
+                    "attempts_remaining": attempts_remaining,
+                }
+            )
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+            defer_on_rate_limit: bool = False,
+        ) -> TelegramMessage:
+            sent.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=790,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
+        self.app._schedule_delayed_preview_delete = fake_schedule_delayed_preview_delete  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._send_run_result(active_run, "最终回复")
+
+        self.assertEqual(
+            scheduled,
+            [
+                {
+                    "run_id": 1,
+                    "attempts_remaining": 2,
+                }
+            ],
+        )
+        self.assertEqual(len(sent), 1)
+        self.assertIn("最终回复", sent[0])
 
     def test_edit_preview_message_pauses_when_telegram_is_rate_limited(self) -> None:
         active_run = ActiveRun(
@@ -398,17 +411,32 @@ class AppMessagingTestCase(unittest.TestCase):
         preview = LivePreviewState()
         calls: list[str] = []
 
-        def fake_edit_message_text(**kwargs) -> None:
-            calls.append(str(kwargs["text"]))
+        def fake_delete_message(**kwargs) -> None:
+            calls.append(f"delete:{kwargs['message_id']}")
 
-        app.telegram.edit_message_text = fake_edit_message_text  # type: ignore[method-assign]
-        app._safe_send_message = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+            defer_on_rate_limit: bool = False,
+        ) -> TelegramMessage:
+            calls.append(str(text))
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=800,
+                message_thread_id=message_thread_id,
+            )
+
+        app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
+        app._safe_send_message = fake_send_message  # type: ignore[method-assign]
 
         with patch("teledex.app.time.monotonic", return_value=12.0):
             app._send_run_result(active_run, "最终回复", preview)
 
-        self.assertEqual(len(calls), 1)
-        self.assertIn("最终回复", calls[0])
+        self.assertEqual(calls[0], "delete:456")
+        self.assertIn("最终回复", calls[1])
 
     def test_safe_send_message_can_schedule_retry_when_rate_limited(self) -> None:
         calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -433,6 +461,36 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0][:3], (100, "最终回复", 9))
+
+    def test_safe_delete_preview_message_can_schedule_retry_when_rate_limited(self) -> None:
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def fake_delete_message(**kwargs) -> None:
+            raise TelegramRateLimitError("限流", retry_after_seconds=15)
+
+        def fake_schedule_delayed_preview_delete(*args, **kwargs) -> None:
+            calls.append((args, kwargs))
+
+        self.app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
+        self.app._schedule_delayed_preview_delete = fake_schedule_delayed_preview_delete  # type: ignore[method-assign]
+
+        result = self.app._safe_delete_preview_message(
+            active_run,
+            defer_on_rate_limit=True,
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0].run_id, 1)
 
     def test_handle_prompt_allows_other_session_to_run_in_parallel(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
