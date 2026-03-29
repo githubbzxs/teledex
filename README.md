@@ -124,7 +124,7 @@ The repository ships with a ready-to-copy `.env.example`. Core variables:
 - `AUTHORIZED_TELEGRAM_USER_IDS`: allowed Telegram user IDs, comma-separated
 - `TELEDEX_STATE_DIR`: local state directory, default `./data`
 - `TELEDEX_POLL_TIMEOUT_SECONDS`: Telegram long-poll timeout, default `30`
-- `TELEDEX_PREVIEW_UPDATE_INTERVAL_SECONDS`: preview heartbeat interval, default `60.0`
+- `TELEDEX_PREVIEW_UPDATE_INTERVAL_SECONDS`: unified preview interval, used for both heartbeat refresh and minimum Telegram edit spacing, default `5.0`
 - `TELEDEX_CODEX_BIN`: path to the Codex executable, default `codex`
 - `TELEDEX_CODEX_EXEC_MODE`: Codex execution mode, supports `default`, `full-auto`, `dangerous`; default `default`, which preserves the local Codex approval and sandbox configuration
 - `TELEDEX_CODEX_MODEL`: optional Codex model override

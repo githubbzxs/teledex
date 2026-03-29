@@ -125,7 +125,7 @@ PYTHONPATH=src python3 -m teledex
 - `AUTHORIZED_TELEGRAM_USER_IDS`：允许访问的 Telegram 用户 ID，多个用逗号分隔
 - `TELEDEX_STATE_DIR`：本地状态目录，默认 `./data`
 - `TELEDEX_POLL_TIMEOUT_SECONDS`：Telegram 长轮询超时，默认 `30`
-- `TELEDEX_PREVIEW_UPDATE_INTERVAL_SECONDS`：过程预览心跳刷新间隔，默认 `60.0`
+- `TELEDEX_PREVIEW_UPDATE_INTERVAL_SECONDS`：统一的过程预览间隔，同时控制心跳刷新与 Telegram 最小编辑间隔，默认 `5.0`
 - `TELEDEX_CODEX_BIN`：Codex 可执行文件路径，默认 `codex`
 - `TELEDEX_CODEX_EXEC_MODE`：Codex 执行模式，支持 `default`、`full-auto`、`dangerous`；默认值为 `default`，表示继承本机 Codex 的 approval 和 sandbox 配置
 - `TELEDEX_CODEX_MODEL`：可选的 Codex 模型覆盖

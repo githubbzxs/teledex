@@ -324,7 +324,7 @@ class AppMessagingTestCase(unittest.TestCase):
                     authorized_user_ids={1},
                     state_dir=Path(temp_dir),
                     poll_timeout_seconds=30,
-                    preview_update_interval_seconds=1.0,
+                    preview_update_interval_seconds=5.0,
                     preview_edit_min_interval_seconds=5.0,
                     codex_bin="codex",
                     codex_exec_mode="default",
