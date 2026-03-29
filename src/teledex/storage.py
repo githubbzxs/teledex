@@ -108,6 +108,23 @@ class Storage:
                     final_excerpt TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS app_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS processed_messages (
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    message_thread_id INTEGER NOT NULL DEFAULT 0,
+                    update_id INTEGER,
+                    text_excerpt TEXT,
+                    processed_at TEXT NOT NULL,
+                    PRIMARY KEY (chat_id, message_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS session_contexts (
                     user_id INTEGER NOT NULL,
                     chat_id INTEGER NOT NULL,
@@ -189,6 +206,118 @@ class Storage:
             )
             self._conn.commit()
             return self.get_user(user_id)
+
+    def get_telegram_update_offset(self) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM app_state WHERE key = 'telegram_update_offset'"
+            ).fetchone()
+        if row is None or row["value"] is None:
+            return None
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return None
+
+    def set_telegram_update_offset(self, next_offset: int) -> None:
+        now = _utc_now()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO app_state (key, value, updated_at)
+                VALUES ('telegram_update_offset', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (str(next_offset), now),
+            )
+            self._conn.commit()
+
+    def has_processed_message(self, chat_id: int, message_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM processed_messages
+                WHERE chat_id = ? AND message_id = ?
+                """,
+                (chat_id, message_id),
+            ).fetchone()
+        return row is not None
+
+    def mark_message_processed(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        message_thread_id: int | None,
+        update_id: int | None,
+        text: str,
+    ) -> None:
+        now = _utc_now()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO processed_messages (
+                    chat_id, message_id, user_id, message_thread_id,
+                    update_id, text_excerpt, processed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    message_thread_id = excluded.message_thread_id,
+                    update_id = excluded.update_id,
+                    text_excerpt = excluded.text_excerpt,
+                    processed_at = excluded.processed_at
+                """,
+                (
+                    chat_id,
+                    message_id,
+                    user_id,
+                    self._normalize_message_thread_id(message_thread_id),
+                    update_id,
+                    text.strip()[:200],
+                    now,
+                ),
+            )
+            self._conn.commit()
+
+    def reconcile_interrupted_runs(self, reason: str) -> int:
+        now = _utc_now()
+        with self._lock:
+            running_rows = self._conn.execute(
+                """
+                SELECT DISTINCT session_id
+                FROM runs
+                WHERE status = 'running' AND ended_at IS NULL
+                """
+            ).fetchall()
+            if not running_rows:
+                return 0
+            self._conn.execute(
+                """
+                UPDATE runs
+                SET status = 'stopped',
+                    ended_at = ?,
+                    error_message = CASE
+                        WHEN error_message IS NULL OR TRIM(error_message) = '' THEN ?
+                        ELSE error_message
+                    END
+                WHERE status = 'running' AND ended_at IS NULL
+                """,
+                (now, reason),
+            )
+            self._conn.executemany(
+                """
+                UPDATE sessions
+                SET status = 'idle', updated_at = ?
+                WHERE id = ?
+                """,
+                [(now, int(row["session_id"])) for row in running_rows],
+            )
+            self._conn.commit()
+        return len(running_rows)
 
     def get_user(self, user_id: int) -> UserState | None:
         with self._lock:
@@ -537,6 +666,7 @@ class Storage:
                 ).fetchone()
                 is not None
             )
+            self._conn.execute("DELETE FROM processed_messages WHERE user_id = ?", (user_id,))
             self._conn.execute("DELETE FROM runs WHERE user_id = ?", (user_id,))
             self._conn.execute("DELETE FROM session_contexts WHERE user_id = ?", (user_id,))
             self._conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))

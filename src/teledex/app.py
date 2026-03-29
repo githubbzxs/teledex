@@ -454,6 +454,7 @@ class TeledexApp:
         self.config = config
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
         self.storage = Storage(self.config.state_dir / "teledex.sqlite3")
+        recovered_runs = self.storage.reconcile_interrupted_runs("服务重启，已回收未完成任务")
         self.telegram = TelegramClient(self.config.telegram_bot_token)
         self.runner = CodexRunner(config)
         self.logger = logging.getLogger("teledex")
@@ -461,10 +462,12 @@ class TeledexApp:
         self._queued_runs: dict[int, list[ActiveRun]] = {}
         self._session_workers: dict[int, threading.Thread] = {}
         self._active_runs_lock = threading.RLock()
-        self._update_offset: int | None = None
+        self._update_offset: int | None = self.storage.get_telegram_update_offset()
         self._telegram_rate_limit_lock = threading.RLock()
         self._telegram_rate_limit_until = 0.0
         self._preview_edit_lock = threading.RLock()
+        if recovered_runs > 0:
+            self.logger.warning("服务启动时回收了 %s 个遗留运行中的会话。", recovered_runs)
 
     def _is_local_command(self, text: str) -> bool:
         return self._extract_command(text) in (_LOCAL_COMMANDS | _LEGACY_LOCAL_COMMANDS)
@@ -487,8 +490,10 @@ class TeledexApp:
                     timeout_seconds=self.config.poll_timeout_seconds,
                 )
                 for update in updates:
-                    self._update_offset = int(update["update_id"]) + 1
+                    next_offset = int(update["update_id"]) + 1
                     self._handle_update(update)
+                    self._update_offset = next_offset
+                    self.storage.set_telegram_update_offset(next_offset)
             except TelegramRateLimitError as exc:
                 delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
                 self.logger.warning("Telegram 轮询触发限流，%s 秒后重试。", delay)
@@ -608,34 +613,51 @@ class TeledexApp:
                 else None
             ),
         )
+        update_id = int(update["update_id"]) if update.get("update_id") is not None else None
 
+        if self.storage.has_processed_message(incoming.chat_id, incoming.message_id):
+            self.logger.info(
+                "忽略重复 Telegram 消息：chat=%s message_id=%s update_id=%s",
+                incoming.chat_id,
+                incoming.message_id,
+                update_id,
+            )
+            return
+
+        handled = False
         if user_id not in self.config.authorized_user_ids:
             self._safe_send_message(
                 incoming.chat_id,
                 "未授权用户，无法使用该 bot。",
                 incoming.message_thread_id,
             )
-            return
+            handled = True
+        else:
+            self.storage.ensure_user(
+                user_id=incoming.user_id,
+                chat_id=incoming.chat_id,
+                message_thread_id=incoming.message_thread_id,
+            )
 
-        self.storage.ensure_user(
-            user_id=incoming.user_id,
-            chat_id=incoming.chat_id,
-            message_thread_id=incoming.message_thread_id,
-        )
+            if incoming.text.startswith("//"):
+                self._handle_prompt(self._normalize_incoming_message(incoming))
+            elif incoming.text.startswith("/") and self._is_local_command(incoming.text):
+                self._handle_command(incoming)
+            elif incoming.text.startswith("/") and self._is_mirrored_codex_command(incoming.text):
+                self._handle_codex_command(incoming)
+            else:
+                self._handle_prompt(incoming)
+            handled = True
 
-        if incoming.text.startswith("//"):
-            self._handle_prompt(self._normalize_incoming_message(incoming))
-            return
-
-        if incoming.text.startswith("/") and self._is_local_command(incoming.text):
-            self._handle_command(incoming)
-            return
-
-        if incoming.text.startswith("/") and self._is_mirrored_codex_command(incoming.text):
-            self._handle_codex_command(incoming)
-            return
-
-        self._handle_prompt(incoming)
+        if handled:
+            self.storage.mark_message_processed(
+                chat_id=incoming.chat_id,
+                message_id=incoming.message_id,
+                user_id=incoming.user_id,
+                message_thread_id=incoming.message_thread_id,
+                update_id=update_id,
+                text=incoming.text,
+            )
 
     def _normalize_incoming_message(self, incoming: IncomingMessage) -> IncomingMessage:
         if not incoming.text.startswith("//"):

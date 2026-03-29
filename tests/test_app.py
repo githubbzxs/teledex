@@ -938,6 +938,56 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(prompts, [])
         self.assertEqual(commands, ["/tbind /root/demo"])
 
+    def test_handle_update_skips_duplicate_processed_message(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        prompts: list[str] = []
+
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming.text)
+
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+        update = {
+            "update_id": 30,
+            "message": {
+                "message_id": 901,
+                "text": "重复消息",
+                "from": {"id": 1},
+                "chat": {"id": 100},
+                "message_thread_id": 9,
+            },
+        }
+
+        self.app._handle_update(update)
+        self.app._handle_update(update)
+
+        self.assertEqual(prompts, ["重复消息"])
+
+    def test_app_init_recovers_interrupted_runs_and_reads_saved_offset(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "会话")
+        self.app.storage.update_session_status(session.id, "running")
+        run_id = self.app.storage.create_run(session.id, 1, "未完成任务")
+        self.app.storage.set_telegram_update_offset(88)
+        self.app.storage.close()
+
+        recovered_app = TeledexApp(self.config)
+        try:
+            self.assertEqual(recovered_app._update_offset, 88)
+            recovered_session = recovered_app.storage.get_session(session.id, 1)
+            self.assertIsNotNone(recovered_session)
+            assert recovered_session is not None
+            self.assertEqual(recovered_session.status, "idle")
+            row = recovered_app.storage._conn.execute(
+                "SELECT status, error_message, ended_at FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            assert row is not None
+            self.assertEqual(row["status"], "stopped")
+            self.assertEqual(row["error_message"], "服务重启，已回收未完成任务")
+            self.assertIsNotNone(row["ended_at"])
+        finally:
+            recovered_app.storage.close()
+
     def test_handle_codex_new_command_clears_current_thread_binding(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "teledex")

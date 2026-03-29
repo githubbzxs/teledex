@@ -134,6 +134,49 @@ class StorageTestCase(unittest.TestCase):
         self.assertIsNone(self.storage.get_user(9))
         self.assertEqual(self.storage.list_sessions(9), [])
 
+    def test_telegram_update_offset_can_be_persisted(self) -> None:
+        self.assertIsNone(self.storage.get_telegram_update_offset())
+
+        self.storage.set_telegram_update_offset(1234)
+
+        self.assertEqual(self.storage.get_telegram_update_offset(), 1234)
+
+    def test_processed_message_can_be_marked_and_queried(self) -> None:
+        self.assertFalse(self.storage.has_processed_message(100, 200))
+
+        self.storage.mark_message_processed(
+            chat_id=100,
+            message_id=200,
+            user_id=1,
+            message_thread_id=9,
+            update_id=300,
+            text="测试消息",
+        )
+
+        self.assertTrue(self.storage.has_processed_message(100, 200))
+
+    def test_reconcile_interrupted_runs_marks_running_runs_stopped(self) -> None:
+        self.storage.ensure_user(11, chat_id=104, message_thread_id=8)
+        session = self.storage.create_session(11, "会话")
+        self.storage.update_session_status(session.id, "running")
+        run_id = self.storage.create_run(session.id, 11, "长任务")
+
+        recovered_sessions = self.storage.reconcile_interrupted_runs("服务重启，已回收未完成任务")
+
+        self.assertEqual(recovered_sessions, 1)
+        refreshed = self.storage.get_session(session.id, 11)
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertEqual(refreshed.status, "idle")
+        row = self.storage._conn.execute(
+            "SELECT status, ended_at, error_message FROM runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        self.assertEqual(row["status"], "stopped")
+        self.assertIsNotNone(row["ended_at"])
+        self.assertEqual(row["error_message"], "服务重启，已回收未完成任务")
+
 
 if __name__ == "__main__":
     unittest.main()
