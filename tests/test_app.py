@@ -50,6 +50,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.app = TeledexApp(self.config)
 
     def tearDown(self) -> None:
+        self.app.storage.close()
         self.temp_dir.cleanup()
 
     def test_handle_prompt_preview_message_does_not_reply(self) -> None:
@@ -624,6 +625,7 @@ class AppMessagingTestCase(unittest.TestCase):
                 ("tbind", "绑定目录"),
                 ("tpwd", "当前目录"),
                 ("tstop", "停止任务"),
+                ("twipe", "清空状态"),
             ),
         )
 
@@ -933,6 +935,65 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(
             messages,
             [f"会话 #{session.id} 正在执行中，/new 暂时不可用，请稍后或先 /tstop。"],
+        )
+
+    def test_handle_twipe_command_clears_current_user_state(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        self.app.storage.create_run(session.id, 1, "测试任务")
+        runtime_dir = self.config.state_dir / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        stale_file = runtime_dir / "stale.txt"
+        stale_file.write_text("old", encoding="utf-8")
+
+        messages: list[str] = []
+        reset_calls: list[tuple[int, str]] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1001,
+                message_thread_id=message_thread_id,
+            )
+
+        def fake_reset_terminal(session_id: int, cwd: Path | None = None) -> None:
+            reset_calls.append((session_id, str(cwd) if cwd is not None else ""))
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app.runner.reset_terminal = fake_reset_terminal  # type: ignore[method-assign]
+        self.app._handle_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/twipe",
+                message_id=125,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(reset_calls, [(session.id, self.temp_dir.name)])
+        self.assertEqual(self.app.storage.list_sessions(1), [])
+        self.assertFalse(stale_file.exists())
+        self.assertEqual(
+            messages,
+            [
+                "已清空当前用户的 teledex 状态。\n"
+                "删除会话：1\n"
+                "删除运行记录：1\n"
+                "删除上下文映射：1\n"
+                "重置持久终端：1\n"
+                "清理运行时文件：1\n"
+                "下一条消息会像全新使用一样重新开始。"
+            ],
         )
 
 

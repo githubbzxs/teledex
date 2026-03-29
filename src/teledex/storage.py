@@ -44,6 +44,17 @@ class SessionRecord:
     last_active_at: str
 
 
+@dataclass(slots=True)
+class UserWipeSummary:
+    user_id: int
+    session_ids: list[int]
+    bound_paths: list[str]
+    sessions_deleted: int
+    runs_deleted: int
+    contexts_deleted: int
+    user_deleted: bool
+
+
 class Storage:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -53,6 +64,10 @@ class Storage:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -484,6 +499,57 @@ class Storage:
             return None
         text = str(row["final_excerpt"]).strip()
         return text or None
+
+    def wipe_user_data(self, user_id: int) -> UserWipeSummary:
+        with self._lock:
+            session_rows = self._conn.execute(
+                """
+                SELECT id, bound_path
+                FROM sessions
+                WHERE user_id = ?
+                ORDER BY id ASC
+                """,
+                (user_id,),
+            ).fetchall()
+            session_ids = [int(row["id"]) for row in session_rows]
+            bound_paths = [
+                str(row["bound_path"])
+                for row in session_rows
+                if row["bound_path"] is not None and str(row["bound_path"]).strip()
+            ]
+            runs_deleted = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM runs WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()[0]
+            )
+            contexts_deleted = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM session_contexts WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()[0]
+            )
+            user_deleted = (
+                self._conn.execute(
+                    "SELECT 1 FROM users WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+                is not None
+            )
+            self._conn.execute("DELETE FROM runs WHERE user_id = ?", (user_id,))
+            self._conn.execute("DELETE FROM session_contexts WHERE user_id = ?", (user_id,))
+            self._conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            self._conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            self._conn.commit()
+        return UserWipeSummary(
+            user_id=user_id,
+            session_ids=session_ids,
+            bound_paths=bound_paths,
+            sessions_deleted=len(session_ids),
+            runs_deleted=runs_deleted,
+            contexts_deleted=contexts_deleted,
+            user_deleted=user_deleted,
+        )
 
     def _row_to_user(self, row: sqlite3.Row | None) -> UserState | None:
         if row is None:

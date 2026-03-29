@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import shutil
 import subprocess
 import threading
 import time
@@ -32,6 +33,7 @@ HELP_TEXT = """teledex 可用命令：
 /tbind <绝对路径> - 绑定当前会话目录并启动持久 tmux 终端
 /tpwd - 查看当前会话目录
 /tstop - 停止当前任务
+/twipe - 清空当前用户全部 teledex 状态
 
 除以上管理命令外，其他 `/命令` 会直接作为 Codex 原生命令发送到当前会话。
 直接发送普通文本，也会继续当前活跃会话。"""
@@ -54,6 +56,7 @@ _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("tbind", "绑定目录"),
     ("tpwd", "当前目录"),
     ("tstop", "停止任务"),
+    ("twipe", "清空状态"),
 )
 _LOCAL_COMMANDS = {
     "/start",
@@ -64,6 +67,7 @@ _LOCAL_COMMANDS = {
     "/tbind",
     "/tpwd",
     "/tstop",
+    "/twipe",
 }
 _MIRRORED_CODEX_COMMANDS = {
     "/agent",
@@ -862,6 +866,10 @@ class TeledexApp:
                 )
             return
 
+        if command == "/twipe":
+            self._handle_wipe_command(incoming)
+            return
+
         self._safe_send_message(
             incoming.chat_id,
             f"未知命令：{command}\n\n{HELP_TEXT}",
@@ -1584,6 +1592,45 @@ class TeledexApp:
             incoming.message_thread_id,
         )
 
+    def _handle_wipe_command(self, incoming: IncomingMessage) -> None:
+        sessions = self.storage.list_sessions(incoming.user_id)
+        stopped_runs = 0
+        reset_terminals = 0
+        for session in sessions:
+            if self._stop_session_run(session.id):
+                stopped_runs += 1
+            if not session.bound_path:
+                continue
+            try:
+                self.runner.reset_terminal(session.id, Path(session.bound_path))
+                reset_terminals += 1
+            except Exception:
+                self.logger.warning(
+                    "清空会话 #%s 的 tmux 终端失败：%s",
+                    session.id,
+                    session.bound_path,
+                    exc_info=True,
+                )
+
+        runtime_deleted = self._clear_runtime_artifacts()
+        summary = self.storage.wipe_user_data(incoming.user_id)
+        lines = [
+            "已清空当前用户的 teledex 状态。",
+            f"删除会话：{summary.sessions_deleted}",
+            f"删除运行记录：{summary.runs_deleted}",
+            f"删除上下文映射：{summary.contexts_deleted}",
+            f"重置持久终端：{reset_terminals}",
+            f"清理运行时文件：{runtime_deleted}",
+        ]
+        if stopped_runs > 0:
+            lines.append(f"已中断运行中的任务：{stopped_runs}")
+        lines.append("下一条消息会像全新使用一样重新开始。")
+        self._safe_send_message(
+            incoming.chat_id,
+            "\n".join(lines),
+            incoming.message_thread_id,
+        )
+
     def _get_active_session_or_notify(self, incoming: IncomingMessage) -> SessionRecord | None:
         session = self.storage.get_active_session(
             incoming.user_id,
@@ -1613,6 +1660,22 @@ class TeledexApp:
 
     def _reset_session_thread(self, session_id: int) -> None:
         self.storage.clear_session_thread_id(session_id)
+
+    def _clear_runtime_artifacts(self) -> int:
+        runtime_dir = self.config.state_dir / "runtime"
+        if not runtime_dir.exists():
+            return 0
+        deleted = 0
+        for path in runtime_dir.iterdir():
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+                deleted += 1
+            except OSError:
+                self.logger.warning("清理运行时文件失败：%s", path, exc_info=True)
+        return deleted
 
     def _apply_session_codex_settings(
         self,

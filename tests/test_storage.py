@@ -14,6 +14,7 @@ class StorageTestCase(unittest.TestCase):
         self.storage = Storage(self.db_path)
 
     def tearDown(self) -> None:
+        self.storage.close()
         self.temp_dir.cleanup()
 
     def test_create_session_and_switch_active(self) -> None:
@@ -98,6 +99,25 @@ class StorageTestCase(unittest.TestCase):
         self.assertIsNotNone(fetched)
         assert fetched is not None
         self.assertEqual(fetched.codex_settings, settings)
+
+    def test_wipe_user_data_removes_user_sessions_runs_and_contexts(self) -> None:
+        self.storage.ensure_user(9, chat_id=103, message_thread_id=7)
+        session = self.storage.create_session(9, "会话")
+        self.storage.bind_session_path(session.id, 9, "/root/demo")
+        self.storage.set_active_session(9, session.id, chat_id=103, message_thread_id=7)
+        self.storage.create_run(session.id, 9, "测试任务")
+
+        summary = self.storage.wipe_user_data(9)
+
+        self.assertEqual(summary.user_id, 9)
+        self.assertEqual(summary.session_ids, [session.id])
+        self.assertEqual(summary.bound_paths, ["/root/demo"])
+        self.assertEqual(summary.sessions_deleted, 1)
+        self.assertEqual(summary.runs_deleted, 1)
+        self.assertEqual(summary.contexts_deleted, 1)
+        self.assertTrue(summary.user_deleted)
+        self.assertIsNone(self.storage.get_user(9))
+        self.assertEqual(self.storage.list_sessions(9), [])
 
 
 if __name__ == "__main__":

@@ -287,6 +287,25 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertIn("cd /root/freecodex && python3 -c", shell_command)
         self.assertIn("print(", shell_command)
 
+    def test_format_start_log_message_avoids_embedding_shell_command_or_env(self) -> None:
+        message = self.runner._format_start_log_message(
+            Path("/root/freecodex"),
+            "thread-123",
+            {
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+                "approval_policy": "never",
+                "sandbox_mode": "danger-full-access",
+                "collaboration_mode": "default",
+            },
+        )
+
+        self.assertIn("cwd=/root/freecodex", message)
+        self.assertIn("thread=thread-123", message)
+        self.assertIn("model=gpt-5.4", message)
+        self.assertNotIn("env -i", message)
+        self.assertNotIn("GH_TOKEN", message)
+
 
 if __name__ == "__main__":
     unittest.main()

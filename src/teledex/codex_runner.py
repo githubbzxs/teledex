@@ -161,7 +161,7 @@ class CodexRunner:
             settings=settings or {},
         )
         shell_command = self._build_shell_command(cwd, command)
-        self.logger.info("通过 tmux 启动 Codex 命令：%s", shell_command)
+        self.logger.info("%s", self._format_start_log_message(cwd, thread_id, settings or {}))
         self._run_tmux([self.config.tmux_bin, "send-keys", "-t", tmux_target, "C-c"])
         self._run_tmux(
             [self.config.tmux_bin, "send-keys", "-t", tmux_target, shell_command, "Enter"]
@@ -525,6 +525,28 @@ class CodexRunner:
                 "thread/backgroundTerminals/clean",
                 {"threadId": thread_id},
             ),
+        )
+
+    def _format_start_log_message(
+        self,
+        cwd: Path,
+        thread_id: str | None,
+        settings: dict[str, Any],
+    ) -> str:
+        effective_settings = settings or {}
+        model = str(effective_settings.get("model") or self.config.codex_model or "default")
+        effort = str(effective_settings.get("reasoning_effort") or "default")
+        approval = str(effective_settings.get("approval_policy") or "default")
+        sandbox = str(effective_settings.get("sandbox_mode") or "default")
+        collaboration = str(effective_settings.get("collaboration_mode") or "default")
+        thread_state = thread_id if thread_id else "new"
+        search_state = "on" if self.config.codex_enable_search else "off"
+        return (
+            "通过 tmux 启动 Codex 会话："
+            f" cwd={cwd} thread={thread_state} model={model}"
+            f" effort={effort} approval={approval}"
+            f" sandbox={sandbox} collab={collaboration}"
+            f" exec_mode={self.config.codex_exec_mode} search={search_state}"
         )
 
     def _build_command(
