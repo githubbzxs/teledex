@@ -157,6 +157,8 @@ class TelegramClient:
                     retry_after_seconds=retry_after,
                 ) from exc
             raise TelegramApiError(f"Telegram HTTP 错误: {detail}") from exc
+        except TimeoutError as exc:
+            raise TelegramApiError(f"Telegram 请求超时: {exc}") from exc
         except urllib.error.URLError as exc:
             raise TelegramApiError(f"Telegram 连接失败: {exc}") from exc
 
