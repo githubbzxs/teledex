@@ -126,7 +126,7 @@ The repository ships with a ready-to-copy `.env.example`. Core variables:
 - `TELEDEX_POLL_TIMEOUT_SECONDS`: Telegram long-poll timeout, default `30`
 - `TELEDEX_PREVIEW_UPDATE_INTERVAL_SECONDS`: preview heartbeat interval, default `60.0`
 - `TELEDEX_CODEX_BIN`: path to the Codex executable, default `codex`
-- `TELEDEX_CODEX_EXEC_MODE`: Codex execution mode, supports `default`, `full-auto`, `dangerous`
+- `TELEDEX_CODEX_EXEC_MODE`: Codex execution mode, supports `default`, `full-auto`, `dangerous`; default `default`, which preserves the local Codex approval and sandbox configuration
 - `TELEDEX_CODEX_MODEL`: optional Codex model override
 - `TELEDEX_CODEX_ENABLE_SEARCH`: whether search is enabled
 - `TELEDEX_TMUX_BIN`: path to the tmux executable, default `tmux`

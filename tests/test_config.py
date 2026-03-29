@@ -22,6 +22,7 @@ class ConfigTestCase(unittest.TestCase):
 
         self.assertEqual(config.preview_update_interval_seconds, 60.0)
         self.assertEqual(config.preview_edit_min_interval_seconds, 5.0)
+        self.assertEqual(config.codex_exec_mode, "default")
 
 
 if __name__ == "__main__":

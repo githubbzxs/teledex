@@ -62,7 +62,7 @@ class AppConfig:
         )
         codex_bin = os.environ.get("TELEDEX_CODEX_BIN", "codex").strip() or "codex"
         codex_exec_mode = (
-            os.environ.get("TELEDEX_CODEX_EXEC_MODE", "full-auto").strip().lower()
+            os.environ.get("TELEDEX_CODEX_EXEC_MODE", "default").strip().lower()
         )
         if codex_exec_mode not in {"default", "full-auto", "dangerous"}:
             raise ValueError(

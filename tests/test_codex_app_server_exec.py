@@ -5,12 +5,16 @@ from pathlib import Path
 
 from teledex.codex_app_server_exec import (
     _build_footer_statusline,
+    _execution_overrides,
     _extract_reasoning_effort,
     _extract_status_line_items,
 )
 
 
 class CodexAppServerExecTestCase(unittest.TestCase):
+    def test_execution_overrides_keeps_local_permissions_in_default_mode(self) -> None:
+        self.assertEqual(_execution_overrides("default"), {})
+
     def test_extract_reasoning_effort_supports_snake_case_config_field(self) -> None:
         self.assertEqual(
             _extract_reasoning_effort({"model_reasoning_effort": "high"}),

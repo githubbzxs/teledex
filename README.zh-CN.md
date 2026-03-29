@@ -127,7 +127,7 @@ PYTHONPATH=src python3 -m teledex
 - `TELEDEX_POLL_TIMEOUT_SECONDS`：Telegram 长轮询超时，默认 `30`
 - `TELEDEX_PREVIEW_UPDATE_INTERVAL_SECONDS`：过程预览心跳刷新间隔，默认 `60.0`
 - `TELEDEX_CODEX_BIN`：Codex 可执行文件路径，默认 `codex`
-- `TELEDEX_CODEX_EXEC_MODE`：Codex 执行模式，支持 `default`、`full-auto`、`dangerous`
+- `TELEDEX_CODEX_EXEC_MODE`：Codex 执行模式，支持 `default`、`full-auto`、`dangerous`；默认值为 `default`，表示继承本机 Codex 的 approval 和 sandbox 配置
 - `TELEDEX_CODEX_MODEL`：可选的 Codex 模型覆盖
 - `TELEDEX_CODEX_ENABLE_SEARCH`：是否启用搜索能力
 - `TELEDEX_CODEX_PERSIST_EXTENDED_HISTORY`：是否持久化更完整的线程历史，默认 `true`
