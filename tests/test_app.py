@@ -1137,7 +1137,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0m)",
+            "○ Thinking (0m)\n\n/bin/bash -lc 'pwd'\nfirst line\nsecond line",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -1175,7 +1175,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0m)\n\n先检查 README\n\n最终输出",
+            "○ Thinking (0m)\n\n最终输出",
         )
 
     def test_complete_clears_transient_sections_and_keeps_final_output(self) -> None:
@@ -1185,6 +1185,16 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_stream_text("最终输出")
 
         self.assertEqual(preview.complete(), "● Completed (0m)\n\n最终输出")
+
+    def test_commentary_completed_keeps_process_text_before_final_output(self) -> None:
+        preview = LivePreviewState()
+        preview.update_commentary("msg_1", "先检查 README")
+        preview.clear_commentary("msg_1")
+
+        self.assertEqual(
+            preview.render(),
+            "○ Thinking (0m)\n\n先检查 README",
+        )
 
     def test_drain_preview_stream_retries_when_preview_edit_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1291,6 +1301,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
             return True
 
         app._update_preview = fake_update_preview  # type: ignore[method-assign]
+        app._safe_send_chat_action = lambda *args, **kwargs: None  # type: ignore[method-assign]
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
         self.assertEqual(attempts, ["○ Thinking (0m)\n\n实时过程"])
@@ -1357,6 +1368,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
             return True
 
         app._update_preview = fake_update_preview  # type: ignore[method-assign]
+        app._safe_send_chat_action = lambda *args, **kwargs: None  # type: ignore[method-assign]
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
         self.assertEqual(attempts, ["● Thinking (0m)\n\n继续思考"])
@@ -1382,7 +1394,8 @@ class LivePreviewStateTestCase(unittest.TestCase):
         rendered = preview.render()
 
         self.assertLessEqual(len(rendered), 3800)
-        self.assertTrue(rendered.endswith("..."))
+        self.assertNotIn("cmd", rendered)
+        self.assertNotIn("BBB", rendered)
 
 
 if __name__ == "__main__":

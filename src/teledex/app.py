@@ -184,6 +184,12 @@ class LivePreviewState:
         with self._lock:
             if normalized == self._target_text:
                 return
+            if not self._target_text:
+                self._commentary_order.clear()
+                self._commentary_text_by_id.clear()
+                self._tool_order.clear()
+                self._tool_command_by_id.clear()
+                self._tool_output_by_id.clear()
             self._target_text = normalized
             self._in_progress = True
             self._flush_requested = True
@@ -208,6 +214,8 @@ class LivePreviewState:
         if not normalized_id:
             return
         with self._lock:
+            if not self._target_text:
+                return
             if normalized_id not in self._commentary_text_by_id:
                 return
             self._commentary_text_by_id.pop(normalized_id, None)
@@ -339,16 +347,20 @@ class LivePreviewState:
 
     def _build_body_locked(self) -> str:
         sections: list[str] = []
-        commentary = self._render_commentary_locked()
-        if commentary:
-            sections.append(commentary)
-
-        output_text = _truncate_preview_text(
-            self._target_text,
-            self._output_max_chars,
-        )
-        if output_text:
-            sections.append(output_text)
+        if self._target_text:
+            output_text = _truncate_preview_text(
+                self._target_text,
+                self._output_max_chars,
+            )
+            if output_text:
+                sections.append(output_text)
+        else:
+            commentary = self._render_commentary_locked()
+            if commentary:
+                sections.append(commentary)
+            tool_blocks = self._render_tool_blocks_locked()
+            if tool_blocks:
+                sections.append(tool_blocks)
 
         return "\n\n".join(section for section in sections if section).strip()
 
@@ -363,23 +375,22 @@ class LivePreviewState:
         return _truncate_preview_middle("\n\n".join(entries), self._history_max_chars)
 
     def _render_tool_blocks_locked(self) -> str:
-        blocks: list[str] = []
-        for item_id in self._tool_order:
-            output_text = _truncate_preview_tail(
-                self._tool_output_by_id.get(item_id, ""),
-                self._tool_output_max_chars,
+        if not self._tool_order:
+            return ""
+        item_id = self._tool_order[-1]
+        output_text = _truncate_preview_tail(
+            self._tool_output_by_id.get(item_id, ""),
+            self._tool_output_max_chars,
+        )
+        parts = [
+            part
+            for part in (
+                self._tool_command_by_id.get(item_id, ""),
+                output_text,
             )
-            parts = [
-                part
-                for part in (
-                    self._tool_command_by_id.get(item_id, ""),
-                    output_text,
-                )
-                if part
-            ]
-            if parts:
-                blocks.append("\n".join(parts).strip())
-        return "\n\n".join(blocks).strip()
+            if part
+        ]
+        return "\n".join(parts).strip()
 
 
 def _truncate_preview_text(text: str, max_chars: int) -> str:
