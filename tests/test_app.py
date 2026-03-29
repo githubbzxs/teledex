@@ -1247,7 +1247,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
             "○ Thinking (0m)\n\n先看目录\n\n再检查配置",
         )
 
-    def test_command_output_is_rendered_in_preview(self) -> None:
+    def test_command_output_is_hidden_from_preview(self) -> None:
         preview = LivePreviewState()
         preview.update_tool_state(
             "call_1",
@@ -1255,9 +1255,39 @@ class LivePreviewStateTestCase(unittest.TestCase):
             output_text="first line\nsecond line",
         )
 
+        self.assertEqual(preview.render(), "○ Thinking (0m)")
+
+    def test_preview_hides_fenced_code_blocks_in_commentary(self) -> None:
+        preview = LivePreviewState()
+        preview.update_commentary(
+            "msg_1",
+            "先检查逻辑\n\n```python\nprint('hello')\n```\n\n再继续",
+        )
+
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0m)\n\n/bin/bash -lc 'pwd'\nfirst line\nsecond line",
+            "○ Thinking (0m)\n\n先检查逻辑\n\n再继续",
+        )
+
+    def test_preview_replaces_code_only_commentary_with_generic_status(self) -> None:
+        preview = LivePreviewState()
+        preview.update_commentary(
+            "msg_1",
+            "```python\nprint('hello')\n```",
+        )
+
+        self.assertEqual(
+            preview.render(),
+            "○ Thinking (0m)\n\n正在处理实现细节",
+        )
+
+    def test_preview_hides_fenced_code_blocks_in_stream_text(self) -> None:
+        preview = LivePreviewState()
+        preview.update_stream_text("先说明\n\n```ts\nconst a = 1;\n```\n\n后说明")
+
+        self.assertEqual(
+            preview.render(),
+            "○ Thinking (0m)\n\n先说明\n\n后说明",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:

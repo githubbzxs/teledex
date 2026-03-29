@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -351,7 +352,7 @@ class LivePreviewState:
         sections: list[str] = []
         if self._target_text:
             output_text = _truncate_preview_text(
-                self._target_text,
+                _sanitize_preview_text(self._target_text),
                 self._output_max_chars,
             )
             if output_text:
@@ -370,35 +371,35 @@ class LivePreviewState:
         if not self._commentary_order:
             return ""
         entries = [
-            self._commentary_text_by_id[item_id]
+            _sanitize_preview_text(self._commentary_text_by_id[item_id])
             for item_id in self._commentary_order
             if self._commentary_text_by_id.get(item_id)
         ]
-        return _truncate_preview_middle("\n\n".join(entries), self._history_max_chars)
+        filtered_entries = [entry for entry in entries if entry]
+        if not filtered_entries:
+            return ""
+        return _truncate_preview_middle("\n\n".join(filtered_entries), self._history_max_chars)
 
     def _render_tool_blocks_locked(self) -> str:
-        if not self._tool_order:
-            return ""
-        item_id = self._tool_order[-1]
-        output_text = _truncate_preview_tail(
-            self._tool_output_by_id.get(item_id, ""),
-            self._tool_output_max_chars,
-        )
-        parts = [
-            part
-            for part in (
-                self._tool_command_by_id.get(item_id, ""),
-                output_text,
-            )
-            if part
-        ]
-        return "\n".join(parts).strip()
+        return ""
 
 
 def _truncate_preview_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 3].rstrip() + "..."
+
+
+def _sanitize_preview_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").strip()
+    if not normalized:
+        return ""
+    sanitized = re.sub(r"```[\s\S]*?```", "", normalized)
+    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
+    sanitized = sanitized.strip()
+    if sanitized:
+        return sanitized
+    return "正在处理实现细节"
 
 
 def _truncate_preview_middle(text: str, max_chars: int) -> str:
