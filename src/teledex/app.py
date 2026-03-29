@@ -264,11 +264,12 @@ class LivePreviewState:
 
     def advance(self, animate_steps: int = 0, elapsed_seconds: int = 0) -> str:
         with self._lock:
+            if self._in_progress and elapsed_seconds > 0:
+                self._elapsed_seconds += max(0, elapsed_seconds)
             if animate_steps > 0 and self._in_progress:
                 self._frame_index = (
                     self._frame_index + animate_steps
                 ) % len(_PREVIEW_HEARTBEAT_FRAMES)
-                self._elapsed_seconds += max(0, elapsed_seconds)
             return self._render_locked()
 
     def render(self) -> str:

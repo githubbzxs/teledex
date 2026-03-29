@@ -1106,6 +1106,11 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=180), "● Thinking (3m)")
 
+    def test_status_line_accumulates_elapsed_even_when_animation_is_paused(self) -> None:
+        preview = LivePreviewState(initial_status="Thinking")
+
+        self.assertEqual(preview.advance(animate_steps=0, elapsed_seconds=60), "○ Thinking (1m)")
+
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState()
         preview.update_stream_text("abcdef")
