@@ -191,6 +191,24 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertEqual(parsed.preview_text, "最终回复")
         self.assertEqual(parsed.final_message, "最终回复")
 
+    def test_parse_event_line_captures_generated_image_path(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "image_generation",
+                        "id": "img_1",
+                        "savedPath": "/tmp/generated-image.png",
+                        "status": "completed",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.generated_image_path, "/tmp/generated-image.png")
+
     def test_parse_event_line_supports_footer_statusline_updates(self) -> None:
         parsed = self.runner.parse_event_line(
             json.dumps(

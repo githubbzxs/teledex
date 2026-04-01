@@ -642,19 +642,21 @@ def _build_thread_resume_params(args: argparse.Namespace) -> dict[str, Any]:
 def _build_turn_start_params(
     thread_id: str,
     prompt: str,
+    input_items: list[dict[str, Any]] | None,
     args: argparse.Namespace,
     fallback_model: str | None,
     fallback_effort: str | None,
 ) -> dict[str, Any]:
+    normalized_input = input_items or [
+        {
+            "type": "text",
+            "text": prompt,
+            "text_elements": [],
+        }
+    ]
     params: dict[str, Any] = {
         "threadId": thread_id,
-        "input": [
-            {
-                "type": "text",
-                "text": prompt,
-                "text_elements": [],
-            }
-        ],
+        "input": normalized_input,
     }
     if args.model:
         params["model"] = args.model
@@ -978,6 +980,7 @@ def run(args: argparse.Namespace) -> int:
             _build_turn_start_params(
                 thread_id,
                 prompt,
+                None,
                 args,
                 str(status_line_state.get("model") or "").strip() or None,
                 _extract_reasoning_effort(config),

@@ -77,6 +77,7 @@ class ParsedCodexEvent:
     tool_output_text: str | None = None
     thread_id: str | None = None
     final_message: str | None = None
+    generated_image_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -162,6 +163,7 @@ class CodexRunner:
     def start(
         self,
         prompt: str,
+        input_items: list[dict[str, Any]] | None,
         cwd: Path,
         thread_id: str | None,
         runtime_dir: Path,
@@ -201,6 +203,7 @@ class CodexRunner:
             runtime,
             handle,
             prompt=prompt,
+            input_items=input_items,
             thread_id=thread_id,
             settings=settings or {},
         )
@@ -307,6 +310,16 @@ class CodexRunner:
                         final_message=(text or None) if event_type == "item.completed" else None,
                     )
                 )
+            if item_type == "image_generation":
+                saved_path = str(item.get("savedPath") or "").strip()
+                if saved_path:
+                    return _with_footer(
+                        ParsedCodexEvent(
+                            status_text="Thinking",
+                            generated_image_path=saved_path,
+                        )
+                    )
+                return _with_footer(ParsedCodexEvent(status_text="Thinking"))
             if item_type == "plan":
                 return ParsedCodexEvent(footer_statusline=footer_statusline)
             if item_type == "reasoning":
@@ -774,6 +787,7 @@ class CodexRunner:
         handle: CodexProcessHandle,
         *,
         prompt: str,
+        input_items: list[dict[str, Any]] | None,
         thread_id: str | None,
         settings: dict[str, Any],
     ) -> None:
@@ -785,7 +799,7 @@ class CodexRunner:
             runtime.pending_aux_request_ids.clear()
             worker = threading.Thread(
                 target=self._run_runtime_turn,
-                args=(runtime, handle, prompt, thread_id, settings),
+                args=(runtime, handle, prompt, input_items, thread_id, settings),
                 daemon=True,
             )
             runtime.turn_worker = worker
@@ -796,6 +810,7 @@ class CodexRunner:
         runtime: _PersistentRuntime,
         handle: CodexProcessHandle,
         prompt: str,
+        input_items: list[dict[str, Any]] | None,
         thread_id: str | None,
         settings: dict[str, Any],
     ) -> None:
@@ -827,6 +842,7 @@ class CodexRunner:
                 _build_turn_start_params(
                     bound_thread_id,
                     prompt,
+                    input_items,
                     args,
                     self._runtime_model(runtime),
                     _extract_reasoning_effort(runtime.status_line_state or {}),

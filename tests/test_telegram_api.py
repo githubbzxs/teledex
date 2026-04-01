@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from teledex.telegram_api import (
@@ -44,6 +46,30 @@ class TelegramApiTestCase(unittest.TestCase):
                 client.get_me()
 
         self.assertIn("Telegram 请求超时", str(context.exception))
+
+    def test_send_photo_uses_multipart_request(self) -> None:
+        client = TelegramClient("test-token", timeout_seconds=1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photo_path = Path(temp_dir) / "image.png"
+            photo_path.write_bytes(b"png")
+
+            captured: list[tuple[str, bytes | None, dict[str, str], int | None]] = []
+
+            def fake_send_request(method, *, data, headers, timeout):
+                captured.append((method, data, headers, timeout))
+                return {
+                    "chat": {"id": 100},
+                    "message_id": 200,
+                }
+
+            client._send_request = fake_send_request  # type: ignore[method-assign]
+            message = client.send_photo(chat_id=100, photo_path=photo_path)
+
+        self.assertEqual(message.chat_id, 100)
+        self.assertEqual(message.message_id, 200)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0][0], "sendPhoto")
+        self.assertIn("multipart/form-data", captured[0][2]["Content-Type"])
 
 
 if __name__ == "__main__":
