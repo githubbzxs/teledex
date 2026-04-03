@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -195,6 +196,10 @@ class TelegramClient:
             raise TelegramApiError(f"Telegram 请求超时: {exc}") from exc
         except urllib.error.URLError as exc:
             raise TelegramApiError(f"Telegram 连接失败: {exc}") from exc
+        except http.client.HTTPException as exc:
+            raise TelegramApiError(f"Telegram 连接异常: {exc}") from exc
+        except OSError as exc:
+            raise TelegramApiError(f"Telegram 网络异常: {exc}") from exc
         return destination
 
     def _call(
@@ -275,6 +280,10 @@ class TelegramClient:
             raise TelegramApiError(f"Telegram 请求超时: {exc}") from exc
         except urllib.error.URLError as exc:
             raise TelegramApiError(f"Telegram 连接失败: {exc}") from exc
+        except http.client.HTTPException as exc:
+            raise TelegramApiError(f"Telegram 连接异常: {exc}") from exc
+        except OSError as exc:
+            raise TelegramApiError(f"Telegram 网络异常: {exc}") from exc
 
         if not body.get("ok"):
             retry_after = _extract_retry_after_seconds(body)
