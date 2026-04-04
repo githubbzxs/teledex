@@ -704,10 +704,10 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["No directory is bound yet. Use /tbind <absolute-path> first."])
+        self.assertEqual(calls, ["No directory is bound yet. Use /bind <absolute-path> first."])
         self.assertNotIn(session.id, self.app._active_runs)
 
-    def test_legacy_session_commands_are_redirected_to_tbind(self) -> None:
+    def test_legacy_session_commands_return_migration_hint(self) -> None:
         calls: list[str] = []
 
         def fake_send_message(
@@ -739,10 +739,10 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(
             calls[0],
-            "That management command has been removed. Use /tbind <absolute-path> instead. A session will be created automatically if needed, or switched if the directory is already bound.",
+            "That management command has been removed. Use /bind <absolute-path> instead. A session will be created automatically if needed, or switched if the directory is already bound.",
         )
 
-    def test_tbind_updates_session_name_to_bound_path(self) -> None:
+    def test_bind_updates_session_name_to_bound_path(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "会话一")
         self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
@@ -770,7 +770,7 @@ class AppMessagingTestCase(unittest.TestCase):
             IncomingMessage(
                 chat_id=100,
                 user_id=1,
-                text=f"/tbind {self.temp_dir.name}",
+                text=f"/bind {self.temp_dir.name}",
                 message_id=2,
                 message_thread_id=9,
             )
@@ -783,7 +783,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn(f"Current name: {Path(self.temp_dir.name).name}", calls[0])
 
-    def test_tbind_creates_new_session_when_binding_different_directory(self) -> None:
+    def test_bind_creates_new_session_when_binding_different_directory(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         current_dir = tempfile.TemporaryDirectory()
         self.addCleanup(current_dir.cleanup)
@@ -814,7 +814,7 @@ class AppMessagingTestCase(unittest.TestCase):
             IncomingMessage(
                 chat_id=100,
                 user_id=1,
-                text=f"/tbind {self.temp_dir.name}",
+                text=f"/bind {self.temp_dir.name}",
                 message_id=2,
                 message_thread_id=9,
             )
@@ -846,10 +846,8 @@ class AppMessagingTestCase(unittest.TestCase):
             commands[0],
             (
                 ("start", "Show help"),
-                ("tbind", "Bind directory"),
-                ("tpwd", "Current directory"),
-                ("tstop", "Stop task"),
-                ("twipe", "Clear state"),
+                ("bind", "Bind directory"),
+                ("stop", "Stop task"),
             ),
         )
 
@@ -1060,7 +1058,7 @@ class AppMessagingTestCase(unittest.TestCase):
                 "update_id": 3,
                 "message": {
                     "message_id": 789,
-                    "text": "/tbind /root/demo",
+                    "text": "/bind /root/demo",
                     "from": {"id": 1},
                     "chat": {"id": 100},
                     "message_thread_id": 9,
@@ -1069,7 +1067,7 @@ class AppMessagingTestCase(unittest.TestCase):
         )
 
         self.assertEqual(prompts, [])
-        self.assertEqual(commands, ["/tbind /root/demo"])
+        self.assertEqual(commands, ["/bind /root/demo"])
 
     def test_handle_update_skips_duplicate_processed_message(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -1208,10 +1206,10 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(updated.codex_thread_id, "thread-123")
         self.assertEqual(
             messages,
-            [f"Session #{session.id} is running. /new is unavailable until it finishes, or stop it first with /tstop."],
+            [f"Session #{session.id} is running. /new is unavailable until it finishes, or stop it first with /stop."],
         )
 
-    def test_handle_twipe_command_clears_current_user_state(self) -> None:
+    def test_legacy_twipe_command_does_not_clear_user_state(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "teledex")
         self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
@@ -1254,19 +1252,13 @@ class AppMessagingTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(reset_calls, [(session.id, self.temp_dir.name)])
-        self.assertEqual(self.app.storage.list_sessions(1), [])
-        self.assertFalse(stale_file.exists())
+        self.assertEqual(reset_calls, [])
+        self.assertEqual(len(self.app.storage.list_sessions(1)), 1)
+        self.assertTrue(stale_file.exists())
         self.assertEqual(
             messages,
             [
-                "Cleared all teledex state for the current user.\n"
-                "Deleted sessions: 1\n"
-                "Deleted runs: 1\n"
-                "Deleted context mappings: 1\n"
-                "Reset persistent terminals: 1\n"
-                "Deleted runtime artifacts: 1\n"
-                "The next message will start fresh, as if teledex were just opened."
+                "That management command has been removed."
             ],
         )
 

@@ -29,10 +29,8 @@ from .telegram_api import (
 
 HELP_TEXT = """teledex commands:
 /start - Show help
-/tbind <absolute-path> - Bind a directory; creates a session if needed or switches to the existing bound session
-/tpwd - Show the current session directory
-/tstop - Stop the current task
-/twipe - Clear all teledex state for the current user
+/bind <absolute-path> - Bind a directory; creates a session if needed or switches to the existing bound session
+/stop - Stop the current task
 
 Other slash commands are forwarded to the active Codex session as native Codex commands.
 Plain text also continues in the active session."""
@@ -52,23 +50,32 @@ _PENDING_MESSAGE_MAX_SLEEP_SECONDS = 30.0
 _PENDING_MESSAGE_BATCH_SIZE = 20
 _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "Show help"),
-    ("tbind", "Bind directory"),
-    ("tpwd", "Current directory"),
-    ("tstop", "Stop task"),
-    ("twipe", "Clear state"),
+    ("bind", "Bind directory"),
+    ("stop", "Stop task"),
 )
 _LOCAL_COMMANDS = {
     "/start",
     "/help",
-    "/tbind",
-    "/tpwd",
-    "/tstop",
-    "/twipe",
+    "/bind",
+    "/stop",
 }
 _LEGACY_LOCAL_COMMANDS = {
     "/tnew",
     "/tsessions",
     "/tuse",
+    "/tbind",
+    "/tpwd",
+    "/tstop",
+    "/twipe",
+}
+_LEGACY_LOCAL_COMMAND_MESSAGES = {
+    "/tbind": "That management command has been renamed. Use /bind <absolute-path> instead.",
+    "/tstop": "That management command has been renamed. Use /stop instead.",
+    "/tpwd": "That management command has been removed. Use /bind <absolute-path> to switch or create the session you want to work in.",
+    "/twipe": "That management command has been removed.",
+    "/tnew": "That management command has been removed. Use /bind <absolute-path> instead. A session will be created automatically if needed, or switched if the directory is already bound.",
+    "/tsessions": "That management command has been removed. Use /bind <absolute-path> instead. A session will be created automatically if needed, or switched if the directory is already bound.",
+    "/tuse": "That management command has been removed. Use /bind <absolute-path> instead. A session will be created automatically if needed, or switched if the directory is already bound.",
 }
 _MIRRORED_CODEX_COMMANDS = {
     "/agent",
@@ -748,16 +755,19 @@ class TeledexApp:
         if command in _LEGACY_LOCAL_COMMANDS:
             self._safe_send_message(
                 incoming.chat_id,
-                "That management command has been removed. Use /tbind <absolute-path> instead. A session will be created automatically if needed, or switched if the directory is already bound.",
+                _LEGACY_LOCAL_COMMAND_MESSAGES.get(
+                    command,
+                    "That management command has been removed.",
+                ),
                 incoming.message_thread_id,
             )
             return
 
-        if command == "/tbind":
+        if command == "/bind":
             if not args:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "Usage: /tbind <absolute-path>",
+                    "Usage: /bind <absolute-path>",
                     incoming.message_thread_id,
                 )
                 return
@@ -765,7 +775,7 @@ class TeledexApp:
             if not bound_path.is_absolute():
                 self._safe_send_message(
                     incoming.chat_id,
-                    "Please provide an absolute path, for example: /tbind /root/project.",
+                    "Please provide an absolute path, for example: /bind /root/project.",
                     incoming.message_thread_id,
                 )
                 return
@@ -839,7 +849,7 @@ class TeledexApp:
             self._safe_send_message(incoming.chat_id, message, incoming.message_thread_id)
             return
 
-        if command == "/tpwd":
+        if command == "/stop":
             active_session = self.storage.get_active_session(
                 incoming.user_id,
                 incoming.chat_id,
@@ -848,28 +858,7 @@ class TeledexApp:
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "No directory is bound yet. Use /tbind <absolute-path> first.",
-                    incoming.message_thread_id,
-                )
-                return
-            path_text = active_session.bound_path or "No directory is currently bound to this session."
-            self._safe_send_message(
-                incoming.chat_id,
-                f"Current session: #{active_session.id}\nDirectory: {path_text}",
-                incoming.message_thread_id,
-            )
-            return
-
-        if command == "/tstop":
-            active_session = self.storage.get_active_session(
-                incoming.user_id,
-                incoming.chat_id,
-                incoming.message_thread_id,
-            )
-            if active_session is None:
-                self._safe_send_message(
-                    incoming.chat_id,
-                    "No directory is bound yet. Use /tbind <absolute-path> first.",
+                    "No directory is bound yet. Use /bind <absolute-path> first.",
                     incoming.message_thread_id,
                 )
                 return
@@ -885,10 +874,6 @@ class TeledexApp:
                     f"Session #{active_session.id} does not have a running task.",
                     incoming.message_thread_id,
                 )
-            return
-
-        if command == "/twipe":
-            self._handle_wipe_command(incoming)
             return
 
         self._safe_send_message(
@@ -944,14 +929,14 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "No directory is bound yet. Use /tbind <absolute-path> first.",
+                "No directory is bound yet. Use /bind <absolute-path> first.",
                 incoming.message_thread_id,
             )
             return
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"Session #{session.id} is running. /new is unavailable until it finishes, or stop it first with /tstop.",
+                f"Session #{session.id} is running. /new is unavailable until it finishes, or stop it first with /stop.",
                 incoming.message_thread_id,
             )
             return
@@ -960,7 +945,7 @@ class TeledexApp:
         suffix = (
             f"Directory unchanged: {session.bound_path}"
             if session.bound_path
-            else "No directory is currently bound to this session. Use /tbind <absolute-path> first."
+            else "No directory is currently bound to this session. Use /bind <absolute-path> first."
         )
         self._safe_send_message(
             incoming.chat_id,
@@ -975,7 +960,7 @@ class TeledexApp:
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"Session #{session.id} is running. /clear is unavailable until it finishes, or stop it first with /tstop.",
+                f"Session #{session.id} is running. /clear is unavailable until it finishes, or stop it first with /stop.",
                 incoming.message_thread_id,
             )
             return
@@ -1024,7 +1009,7 @@ class TeledexApp:
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"Session #{session.id} is running. /resume is unavailable until it finishes, or stop it first with /tstop.",
+                f"Session #{session.id} is running. /resume is unavailable until it finishes, or stop it first with /stop.",
                 incoming.message_thread_id,
             )
             return
@@ -1045,7 +1030,7 @@ class TeledexApp:
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"Session #{session.id} is running. /fork is unavailable until it finishes, or stop it first with /tstop.",
+                f"Session #{session.id} is running. /fork is unavailable until it finishes, or stop it first with /stop.",
                 incoming.message_thread_id,
             )
             return
@@ -1668,7 +1653,7 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "No directory is bound yet. Use /tbind <absolute-path> first.",
+                "No directory is bound yet. Use /bind <absolute-path> first.",
                 incoming.message_thread_id,
             )
         return session
@@ -1680,7 +1665,7 @@ class TeledexApp:
         if not session.bound_path:
             self._safe_send_message(
                 incoming.chat_id,
-                "No directory is currently bound to this session. Use /tbind <absolute-path> first.",
+                "No directory is currently bound to this session. Use /bind <absolute-path> first.",
                 incoming.message_thread_id,
             )
             return None
@@ -1716,7 +1701,7 @@ class TeledexApp:
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"Session #{session.id} is running. Change Codex settings after it finishes, or stop it first with /tstop.",
+                f"Session #{session.id} is running. Change Codex settings after it finishes, or stop it first with /stop.",
                 incoming.message_thread_id,
             )
             return
@@ -1766,14 +1751,14 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "No directory is bound yet. Use /tbind <absolute-path> first.",
+                "No directory is bound yet. Use /bind <absolute-path> first.",
                 incoming.message_thread_id,
             )
             return
         if not session.bound_path:
             self._safe_send_message(
                 incoming.chat_id,
-                "No directory is currently bound to this session. Use /tbind <absolute-path> first.",
+                "No directory is currently bound to this session. Use /bind <absolute-path> first.",
                 incoming.message_thread_id,
             )
             return

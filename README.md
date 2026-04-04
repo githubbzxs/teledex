@@ -42,7 +42,7 @@ Instead of trying to become a full platform, it focuses on the core remote workf
 - Persistent `tmux` terminal per bound directory
 - Codex runs executed inside the persistent terminal context
 - Live `draft` preview updates inside a single Telegram message
-- `/tstop` support for interrupting the current run
+- `/stop` support for interrupting the current run
 - SQLite persistence for users, sessions, and run state
 
 ## Tech Stack
@@ -136,10 +136,8 @@ The repository ships with a ready-to-copy `.env.example`. Core variables:
 ## Telegram Commands
 
 - `/start`: show help text
-- `/tbind <absolute-path>`: bind the working directory and start the persistent tmux terminal; it creates the session on first bind and reuses it on later binds
-- `/tpwd`: show the bound directory
-- `/tstop`: stop the current task
-- `/twipe`: wipe the current user's teledex state
+- `/bind <absolute-path>`: bind the working directory and start the persistent tmux terminal; it creates the session on first bind and reuses it on later binds
+- `/stop`: stop the current task
 
 All other `/commands` are forwarded directly into the active Codex session.
 
