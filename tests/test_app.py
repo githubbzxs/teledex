@@ -629,7 +629,7 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["当前还没有绑定目录，请先用 /tbind <绝对路径>。"])
+        self.assertEqual(calls, ["No directory is bound yet. Use /tbind <absolute-path> first."])
         self.assertNotIn(session.id, self.app._active_runs)
 
     def test_legacy_session_commands_are_redirected_to_tbind(self) -> None:
@@ -664,7 +664,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(
             calls[0],
-            "这个管理命令已经移除，请直接用 /tbind <绝对路径> 进入目录；如果该目录还没有会话会自动创建，已有则自动切换。",
+            "That management command has been removed. Use /tbind <absolute-path> instead. A session will be created automatically if needed, or switched if the directory is already bound.",
         )
 
     def test_tbind_updates_session_name_to_bound_path(self) -> None:
@@ -706,7 +706,7 @@ class AppMessagingTestCase(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.title, Path(self.temp_dir.name).name)
         self.assertEqual(len(calls), 1)
-        self.assertIn(f"当前名称：{Path(self.temp_dir.name).name}", calls[0])
+        self.assertIn(f"Current name: {Path(self.temp_dir.name).name}", calls[0])
 
     def test_tbind_creates_new_session_when_binding_different_directory(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -754,7 +754,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIsNotNone(active)
         assert active is not None
         self.assertEqual(active.id, sessions[1].id)
-        self.assertIn(f"已自动创建会话 #{sessions[1].id}", calls[0])
+        self.assertIn(f"Created session #{sessions[1].id}", calls[0])
 
     def test_sync_bot_commands_registers_management_commands(self) -> None:
         commands: list[tuple[tuple[str, str], ...]] = []
@@ -770,11 +770,11 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(
             commands[0],
             (
-                ("start", "查看帮助"),
-                ("tbind", "绑定目录"),
-                ("tpwd", "当前目录"),
-                ("tstop", "停止任务"),
-                ("twipe", "清空状态"),
+                ("start", "Show help"),
+                ("tbind", "Bind directory"),
+                ("tpwd", "Current directory"),
+                ("tstop", "Stop task"),
+                ("twipe", "Clear state"),
             ),
         )
 
@@ -1084,7 +1084,7 @@ class AppMessagingTestCase(unittest.TestCase):
         assert updated is not None
         self.assertIsNone(updated.codex_thread_id)
         self.assertEqual(updated.bound_path, self.temp_dir.name)
-        self.assertEqual(messages, [f"已在会话 #{session.id} 中开启新的 Codex 对话。\n目录保持不变：{self.temp_dir.name}"])
+        self.assertEqual(messages, [f"Started a new Codex conversation in session #{session.id}.\nDirectory unchanged: {self.temp_dir.name}"])
 
     def test_handle_codex_new_command_rejects_running_session(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -1133,7 +1133,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(updated.codex_thread_id, "thread-123")
         self.assertEqual(
             messages,
-            [f"会话 #{session.id} 正在执行中，/new 暂时不可用，请稍后或先 /tstop。"],
+            [f"Session #{session.id} is running. /new is unavailable until it finishes, or stop it first with /tstop."],
         )
 
     def test_handle_twipe_command_clears_current_user_state(self) -> None:
@@ -1185,13 +1185,13 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(
             messages,
             [
-                "已清空当前用户的 teledex 状态。\n"
-                "删除会话：1\n"
-                "删除运行记录：1\n"
-                "删除上下文映射：1\n"
-                "重置持久终端：1\n"
-                "清理运行时文件：1\n"
-                "下一条消息会像全新使用一样重新开始。"
+                "Cleared all teledex state for the current user.\n"
+                "Deleted sessions: 1\n"
+                "Deleted runs: 1\n"
+                "Deleted context mappings: 1\n"
+                "Reset persistent terminals: 1\n"
+                "Deleted runtime artifacts: 1\n"
+                "The next message will start fresh, as if teledex were just opened."
             ],
         )
 
@@ -1278,7 +1278,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0m)\n\n正在处理实现细节",
+            "○ Thinking (0m)\n\nWorking through implementation details",
         )
 
     def test_preview_hides_fenced_code_blocks_in_stream_text(self) -> None:

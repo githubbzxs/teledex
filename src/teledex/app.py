@@ -26,15 +26,15 @@ from .telegram_api import (
 )
 
 
-HELP_TEXT = """teledex 可用命令：
-/start - 查看帮助
-/tbind <绝对路径> - 绑定目录；若未创建会话会自动创建，若目录已绑定会自动切换
-/tpwd - 查看当前会话目录
-/tstop - 停止当前任务
-/twipe - 清空当前用户全部 teledex 状态
+HELP_TEXT = """teledex commands:
+/start - Show help
+/tbind <absolute-path> - Bind a directory; creates a session if needed or switches to the existing bound session
+/tpwd - Show the current session directory
+/tstop - Stop the current task
+/twipe - Clear all teledex state for the current user
 
-除以上管理命令外，其他 `/命令` 会直接作为 Codex 原生命令发送到当前会话。
-直接发送普通文本，也会继续当前活跃会话。"""
+Other slash commands are forwarded to the active Codex session as native Codex commands.
+Plain text also continues in the active session."""
 
 _PREVIEW_TYPING_INTERVAL_SECONDS = 4.0
 _PREVIEW_ANIMATION_INTERVAL_SECONDS = 1.0
@@ -47,11 +47,11 @@ _PREVIEW_MESSAGE_MAX_CHARS = 3800
 _PREVIEW_LOOP_IDLE_SECONDS = 0.1
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
 _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("start", "查看帮助"),
-    ("tbind", "绑定目录"),
-    ("tpwd", "当前目录"),
-    ("tstop", "停止任务"),
-    ("twipe", "清空状态"),
+    ("start", "Show help"),
+    ("tbind", "Bind directory"),
+    ("tpwd", "Current directory"),
+    ("tstop", "Stop task"),
+    ("twipe", "Clear state"),
 )
 _LOCAL_COMMANDS = {
     "/start",
@@ -399,7 +399,7 @@ def _sanitize_preview_text(text: str) -> str:
     sanitized = sanitized.strip()
     if sanitized:
         return sanitized
-    return "正在处理实现细节"
+    return "Working through implementation details"
 
 
 def _truncate_preview_middle(text: str, max_chars: int) -> str:
@@ -629,7 +629,7 @@ class TeledexApp:
         if user_id not in self.config.authorized_user_ids:
             self._safe_send_message(
                 incoming.chat_id,
-                "未授权用户，无法使用该 bot。",
+                "You are not authorized to use this bot.",
                 incoming.message_thread_id,
             )
             handled = True
@@ -683,7 +683,7 @@ class TeledexApp:
         if command in _LEGACY_LOCAL_COMMANDS:
             self._safe_send_message(
                 incoming.chat_id,
-                "这个管理命令已经移除，请直接用 /tbind <绝对路径> 进入目录；如果该目录还没有会话会自动创建，已有则自动切换。",
+                "That management command has been removed. Use /tbind <absolute-path> instead. A session will be created automatically if needed, or switched if the directory is already bound.",
                 incoming.message_thread_id,
             )
             return
@@ -692,7 +692,7 @@ class TeledexApp:
             if not args:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "用法：/tbind <绝对路径>",
+                    "Usage: /tbind <absolute-path>",
                     incoming.message_thread_id,
                 )
                 return
@@ -700,14 +700,14 @@ class TeledexApp:
             if not bound_path.is_absolute():
                 self._safe_send_message(
                     incoming.chat_id,
-                    "请提供绝对路径，例如 /tbind /root/project。",
+                    "Please provide an absolute path, for example: /tbind /root/project.",
                     incoming.message_thread_id,
                 )
                 return
             if not bound_path.exists() or not bound_path.is_dir():
                 self._safe_send_message(
                     incoming.chat_id,
-                    f"目录不存在：{bound_path}",
+                    f"Directory does not exist: {bound_path}",
                     incoming.message_thread_id,
                 )
                 return
@@ -750,26 +750,26 @@ class TeledexApp:
                 self.runner.reset_terminal(target_session.id, bound_path)
                 tmux_session_name = self.runner.ensure_terminal(target_session.id, bound_path)
                 action_text = (
-                    f"已自动创建会话 #{target_session.id} 并绑定目录："
+                    f"Created session #{target_session.id} and bound directory:"
                     if created_new_session
-                    else f"会话 #{target_session.id} 已绑定目录："
+                    else f"Session #{target_session.id} is now bound to:"
                 )
                 message = (
                     f"{action_text}\n{bound_path}\n"
-                    f"当前名称：{_session_title_from_path(bound_path)}\n"
-                    f"持久终端：tmux `{tmux_session_name}`"
+                    f"Current name: {_session_title_from_path(bound_path)}\n"
+                    f"Persistent terminal: tmux `{tmux_session_name}`"
                 )
             except Exception as exc:
                 self.logger.exception("初始化 tmux 会话失败")
                 action_text = (
-                    f"已自动创建会话 #{target_session.id} 并绑定目录："
+                    f"Created session #{target_session.id} and bound directory:"
                     if created_new_session
-                    else f"会话 #{target_session.id} 已绑定目录："
+                    else f"Session #{target_session.id} is now bound to:"
                 )
                 message = (
                     f"{action_text}\n{bound_path}\n"
-                    f"当前名称：{_session_title_from_path(bound_path)}\n"
-                    f"但持久 tmux 终端初始化失败：{exc}"
+                    f"Current name: {_session_title_from_path(bound_path)}\n"
+                    f"But the persistent tmux terminal failed to initialize: {exc}"
                 )
             self._safe_send_message(incoming.chat_id, message, incoming.message_thread_id)
             return
@@ -783,14 +783,14 @@ class TeledexApp:
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
+                    "No directory is bound yet. Use /tbind <absolute-path> first.",
                     incoming.message_thread_id,
                 )
                 return
-            path_text = active_session.bound_path or "当前会话还没有绑定目录。"
+            path_text = active_session.bound_path or "No directory is currently bound to this session."
             self._safe_send_message(
                 incoming.chat_id,
-                f"当前会话：#{active_session.id}\n目录：{path_text}",
+                f"Current session: #{active_session.id}\nDirectory: {path_text}",
                 incoming.message_thread_id,
             )
             return
@@ -804,20 +804,20 @@ class TeledexApp:
             if active_session is None:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
+                    "No directory is bound yet. Use /tbind <absolute-path> first.",
                     incoming.message_thread_id,
                 )
                 return
             if self._stop_session_run(active_session.id):
                 self._safe_send_message(
                     incoming.chat_id,
-                    f"已向会话 #{active_session.id} 的当前任务发送停止信号。",
+                    f"Sent a stop signal to the current task in session #{active_session.id}.",
                     incoming.message_thread_id,
                 )
             else:
                 self._safe_send_message(
                     incoming.chat_id,
-                    f"会话 #{active_session.id} 当前没有运行中的任务。",
+                    f"Session #{active_session.id} does not have a running task.",
                     incoming.message_thread_id,
                 )
             return
@@ -828,7 +828,7 @@ class TeledexApp:
 
         self._safe_send_message(
             incoming.chat_id,
-            f"未知命令：{command}\n\n{HELP_TEXT}",
+            f"Unknown command: {command}\n\n{HELP_TEXT}",
             incoming.message_thread_id,
         )
 
@@ -879,27 +879,27 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
+                "No directory is bound yet. Use /tbind <absolute-path> first.",
                 incoming.message_thread_id,
             )
             return
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"会话 #{session.id} 正在执行中，/new 暂时不可用，请稍后或先 /tstop。",
+                f"Session #{session.id} is running. /new is unavailable until it finishes, or stop it first with /tstop.",
                 incoming.message_thread_id,
             )
             return
 
         self._reset_session_thread(session.id)
         suffix = (
-            f"目录保持不变：{session.bound_path}"
+            f"Directory unchanged: {session.bound_path}"
             if session.bound_path
-            else "当前会话还没有绑定目录，请先用 /tbind <绝对路径>。"
+            else "No directory is currently bound to this session. Use /tbind <absolute-path> first."
         )
         self._safe_send_message(
             incoming.chat_id,
-            f"已在会话 #{session.id} 中开启新的 Codex 对话。\n{suffix}",
+            f"Started a new Codex conversation in session #{session.id}.\n{suffix}",
             incoming.message_thread_id,
         )
 
@@ -910,14 +910,14 @@ class TeledexApp:
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"会话 #{session.id} 正在执行中，/clear 暂时不可用，请稍后或先 /tstop。",
+                f"Session #{session.id} is running. /clear is unavailable until it finishes, or stop it first with /tstop.",
                 incoming.message_thread_id,
             )
             return
         self._reset_session_thread(session.id)
         self._safe_send_message(
             incoming.chat_id,
-            f"会话 #{session.id} 已清空当前 Codex 对话。\nTelegram 里的历史消息不会删除，下一条消息会从新对话开始。",
+            f"Cleared the current Codex conversation for session #{session.id}.\nTelegram history is unchanged; the next message will start a fresh conversation.",
             incoming.message_thread_id,
         )
 
@@ -931,16 +931,16 @@ class TeledexApp:
             if not threads:
                 self._safe_send_message(
                     incoming.chat_id,
-                    "当前目录下没有可恢复的 Codex 线程。",
+                    "No resumable Codex threads were found in the current directory.",
                     incoming.message_thread_id,
                 )
                 return
-            lines = ["当前目录最近的 Codex 线程："]
+            lines = ["Recent Codex threads in the current directory:"]
             for index, thread in enumerate(threads, start=1):
                 name = f" [{thread.name}]" if thread.name else ""
-                preview = thread.preview or "无预览"
+                preview = thread.preview or "No preview"
                 lines.append(f"{index}. {thread.thread_id}{name}\n{preview}")
-            lines.append("\n用法：/resume <编号或thread_id>")
+            lines.append("\nUsage: /resume <index-or-thread_id>")
             self._send_long_message(
                 incoming.chat_id,
                 "\n\n".join(lines),
@@ -951,7 +951,7 @@ class TeledexApp:
         if thread is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "没有找到对应的线程。先直接 `/resume` 查看列表，再用编号或完整 thread_id 恢复。",
+                "No matching thread was found. Run `/resume` first to view the list, then resume by index or full thread_id.",
                 incoming.message_thread_id,
                 parse_mode="HTML",
             )
@@ -959,17 +959,17 @@ class TeledexApp:
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"会话 #{session.id} 正在执行中，/resume 暂时不可用，请稍后或先 /tstop。",
+                f"Session #{session.id} is running. /resume is unavailable until it finishes, or stop it first with /tstop.",
                 incoming.message_thread_id,
             )
             return
         self.storage.update_session_thread_id(session.id, thread.thread_id)
         self.runner.reset_session_runtime(session.id)
         self.storage.update_session_status(session.id, "idle")
-        title_text = f"\n名称：{thread.name}" if thread.name else ""
+        title_text = f"\nName: {thread.name}" if thread.name else ""
         self._safe_send_message(
             incoming.chat_id,
-            f"会话 #{session.id} 已恢复到 Codex 线程：{thread.thread_id}{title_text}",
+            f"Session #{session.id} resumed Codex thread: {thread.thread_id}{title_text}",
             incoming.message_thread_id,
         )
 
@@ -980,14 +980,14 @@ class TeledexApp:
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"会话 #{session.id} 正在执行中，/fork 暂时不可用，请稍后或先 /tstop。",
+                f"Session #{session.id} is running. /fork is unavailable until it finishes, or stop it first with /tstop.",
                 incoming.message_thread_id,
             )
             return
         if not session.codex_thread_id:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前会话还没有可 fork 的 Codex 线程，先发起一次对话再试。",
+                "This session does not have an active Codex thread to fork yet. Start a conversation first.",
                 incoming.message_thread_id,
             )
             return
@@ -1004,7 +1004,7 @@ class TeledexApp:
         self.runner.reset_session_runtime(session.id)
         self._safe_send_message(
             incoming.chat_id,
-            f"会话 #{session.id} 已 fork 到新的 Codex 线程：{new_thread_id}",
+            f"Session #{session.id} forked to a new Codex thread: {new_thread_id}",
             incoming.message_thread_id,
         )
 
@@ -1015,7 +1015,7 @@ class TeledexApp:
         if not session.codex_thread_id:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前会话还没有活动的 Codex 线程，先发起一次对话再试。",
+                "This session does not have an active Codex thread yet. Start a conversation first.",
                 incoming.message_thread_id,
             )
             return
@@ -1023,14 +1023,14 @@ class TeledexApp:
         if not name:
             self._safe_send_message(
                 incoming.chat_id,
-                "用法：/rename <新标题>",
+                "Usage: /rename <new-title>",
                 incoming.message_thread_id,
             )
             return
         self.runner.set_thread_name(Path(session.bound_path), session.codex_thread_id, name)
         self._safe_send_message(
             incoming.chat_id,
-            f"当前 Codex 线程已重命名为：{name}",
+            f"Renamed the current Codex thread to: {name}",
             incoming.message_thread_id,
         )
 
@@ -1042,7 +1042,7 @@ class TeledexApp:
         if init_target.exists():
             self._safe_send_message(
                 incoming.chat_id,
-                "当前目录已经存在 AGENTS.md，Codex 原生 /init 也会跳过覆盖。",
+                "AGENTS.md already exists in the current directory, so the native Codex /init would skip it as well.",
                 incoming.message_thread_id,
             )
             return
@@ -1085,7 +1085,7 @@ class TeledexApp:
             return
         if raw == "list":
             models = self.runner.list_models(cwd)
-            lines = ["可用模型："]
+            lines = ["Available models:"]
             for item in models:
                 if not isinstance(item, dict):
                     continue
@@ -1100,7 +1100,7 @@ class TeledexApp:
                 ]
                 suffix = f" | effort: {', '.join(effort_labels)}" if effort_labels else ""
                 lines.append(f"- {model}{suffix}")
-            lines.append("\n用法：/model <model> [effort]")
+            lines.append("\nUsage: /model <model> [effort]")
             self._send_long_message(
                 incoming.chat_id,
                 "\n".join(lines),
@@ -1113,7 +1113,7 @@ class TeledexApp:
         if effort and effort not in _REASONING_EFFORT_VALUES:
             self._safe_send_message(
                 incoming.chat_id,
-                f"不支持的 reasoning effort：{effort}\n可选值：{', '.join(_REASONING_EFFORT_VALUES)}",
+                f"Unsupported reasoning effort: {effort}\nAllowed values: {', '.join(_REASONING_EFFORT_VALUES)}",
                 incoming.message_thread_id,
             )
             return
@@ -1139,7 +1139,7 @@ class TeledexApp:
         elif action == "status":
             self._safe_send_message(
                 incoming.chat_id,
-                f"Fast 模式当前为：{'on' if current else 'off'}",
+                f"Fast mode is currently: {'on' if current else 'off'}",
                 incoming.message_thread_id,
             )
             return
@@ -1150,7 +1150,7 @@ class TeledexApp:
         else:
             self._safe_send_message(
                 incoming.chat_id,
-                "用法：/fast [on|off|status]",
+                "Usage: /fast [on|off|status]",
                 incoming.message_thread_id,
             )
             return
@@ -1158,7 +1158,7 @@ class TeledexApp:
             incoming,
             session,
             {"service_tier": "fast" if enabled else None},
-            f"Fast 模式已设为：{'on' if enabled else 'off'}",
+            f"Fast mode set to: {'on' if enabled else 'off'}",
         )
 
     def _handle_codex_personality_command(self, incoming: IncomingMessage, args: str) -> None:
@@ -1170,7 +1170,7 @@ class TeledexApp:
             current = str(session.codex_settings.get("personality") or "default")
             self._safe_send_message(
                 incoming.chat_id,
-                f"当前 personality：{current}\n可选值：default, {', '.join(_PERSONALITY_VALUES)}",
+                f"Current personality: {current}\nAllowed values: default, {', '.join(_PERSONALITY_VALUES)}",
                 incoming.message_thread_id,
             )
             return
@@ -1181,7 +1181,7 @@ class TeledexApp:
         else:
             self._safe_send_message(
                 incoming.chat_id,
-                f"不支持的 personality：{value}\n可选值：default, {', '.join(_PERSONALITY_VALUES)}",
+                f"Unsupported personality: {value}\nAllowed values: default, {', '.join(_PERSONALITY_VALUES)}",
                 incoming.message_thread_id,
             )
             return
@@ -1189,7 +1189,7 @@ class TeledexApp:
             incoming,
             session,
             {"personality": normalized},
-            f"Personality 已更新为：{normalized or 'default'}",
+            f"Personality updated to: {normalized or 'default'}",
         )
 
     def _handle_codex_approvals_command(self, incoming: IncomingMessage, args: str) -> None:
@@ -1201,7 +1201,7 @@ class TeledexApp:
             current = str(session.codex_settings.get("approval_policy") or "default")
             self._safe_send_message(
                 incoming.chat_id,
-                f"当前 approval policy：{current}\n可选值：default, {', '.join(_APPROVAL_POLICY_VALUES)}",
+                f"Current approval policy: {current}\nAllowed values: default, {', '.join(_APPROVAL_POLICY_VALUES)}",
                 incoming.message_thread_id,
             )
             return
@@ -1212,7 +1212,7 @@ class TeledexApp:
         else:
             self._safe_send_message(
                 incoming.chat_id,
-                f"不支持的 approval policy：{value}\n可选值：default, {', '.join(_APPROVAL_POLICY_VALUES)}",
+                f"Unsupported approval policy: {value}\nAllowed values: default, {', '.join(_APPROVAL_POLICY_VALUES)}",
                 incoming.message_thread_id,
             )
             return
@@ -1220,7 +1220,7 @@ class TeledexApp:
             incoming,
             session,
             {"approval_policy": normalized},
-            f"Approval policy 已更新为：{normalized or 'default'}",
+            f"Approval policy updated to: {normalized or 'default'}",
         )
 
     def _handle_codex_permissions_command(self, incoming: IncomingMessage, args: str) -> None:
@@ -1232,7 +1232,7 @@ class TeledexApp:
             current = str(session.codex_settings.get("sandbox_mode") or "default")
             self._safe_send_message(
                 incoming.chat_id,
-                f"当前 sandbox mode：{current}\n可选值：default, {', '.join(_SANDBOX_MODE_VALUES)}",
+                f"Current sandbox mode: {current}\nAllowed values: default, {', '.join(_SANDBOX_MODE_VALUES)}",
                 incoming.message_thread_id,
             )
             return
@@ -1243,7 +1243,7 @@ class TeledexApp:
         else:
             self._safe_send_message(
                 incoming.chat_id,
-                f"不支持的 sandbox mode：{value}\n可选值：default, {', '.join(_SANDBOX_MODE_VALUES)}",
+                f"Unsupported sandbox mode: {value}\nAllowed values: default, {', '.join(_SANDBOX_MODE_VALUES)}",
                 incoming.message_thread_id,
             )
             return
@@ -1251,7 +1251,7 @@ class TeledexApp:
             incoming,
             session,
             {"sandbox_mode": normalized},
-            f"Sandbox mode 已更新为：{normalized or 'default'}",
+            f"Sandbox mode updated to: {normalized or 'default'}",
         )
 
     def _handle_codex_plan_command(self, incoming: IncomingMessage, args: str) -> None:
@@ -1266,7 +1266,7 @@ class TeledexApp:
         else:
             self._safe_send_message(
                 incoming.chat_id,
-                "用法：/plan [on|off]",
+                "Usage: /plan [on|off]",
                 incoming.message_thread_id,
             )
             return
@@ -1274,7 +1274,7 @@ class TeledexApp:
             incoming,
             session,
             {"collaboration_mode": normalized},
-            f"Collaboration mode 已更新为：{normalized}",
+            f"Collaboration mode updated to: {normalized}",
         )
 
     def _handle_codex_collab_command(self, incoming: IncomingMessage, args: str) -> None:
@@ -1287,7 +1287,7 @@ class TeledexApp:
             current = str(session.codex_settings.get("collaboration_mode") or "default")
             self._safe_send_message(
                 incoming.chat_id,
-                f"当前 collaboration mode：{current}\n用法：/collab list 或 /collab <default|plan>",
+                f"Current collaboration mode: {current}\nUsage: /collab list or /collab <default|plan>",
                 incoming.message_thread_id,
             )
             return
@@ -1298,13 +1298,13 @@ class TeledexApp:
                 for item in modes
                 if isinstance(item, dict) and str(item.get("name") or "").strip()
             ]
-            text = "可用 collaboration mode：\n" + "\n".join(f"- {item}" for item in available)
+            text = "Available collaboration modes:\n" + "\n".join(f"- {item}" for item in available)
             self._safe_send_message(incoming.chat_id, text, incoming.message_thread_id)
             return
         if value not in _COLLABORATION_MODE_VALUES:
             self._safe_send_message(
                 incoming.chat_id,
-                f"不支持的 collaboration mode：{value}\n可选值：{', '.join(_COLLABORATION_MODE_VALUES)}",
+                f"Unsupported collaboration mode: {value}\nAllowed values: {', '.join(_COLLABORATION_MODE_VALUES)}",
                 incoming.message_thread_id,
             )
             return
@@ -1312,7 +1312,7 @@ class TeledexApp:
             incoming,
             session,
             {"collaboration_mode": value},
-            f"Collaboration mode 已更新为：{value}",
+            f"Collaboration mode updated to: {value}",
         )
 
     def _handle_codex_status_command(self, incoming: IncomingMessage, args: str) -> None:
@@ -1320,17 +1320,17 @@ class TeledexApp:
         if session is None:
             return
         lines = [
-            f"会话 #{session.id}",
-            f"目录：{session.bound_path or '未绑定目录'}",
-            f"线程：{session.codex_thread_id or '未创建'}",
-            f"状态：{session.status}",
-            f"模型：{session.codex_settings.get('model') or self.config.codex_model or 'default'}",
-            f"effort：{session.codex_settings.get('reasoning_effort') or 'default'}",
-            f"Fast：{'on' if session.codex_settings.get('service_tier') == 'fast' else 'off'}",
-            f"Personality：{session.codex_settings.get('personality') or 'default'}",
-            f"Approval：{session.codex_settings.get('approval_policy') or 'default'}",
-            f"Sandbox：{session.codex_settings.get('sandbox_mode') or 'default'}",
-            f"Collab：{session.codex_settings.get('collaboration_mode') or 'default'}",
+            f"Session #{session.id}",
+            f"Directory: {session.bound_path or 'Not bound'}",
+            f"Thread: {session.codex_thread_id or 'Not created'}",
+            f"Status: {session.status}",
+            f"Model: {session.codex_settings.get('model') or self.config.codex_model or 'default'}",
+            f"Effort: {session.codex_settings.get('reasoning_effort') or 'default'}",
+            f"Fast: {'on' if session.codex_settings.get('service_tier') == 'fast' else 'off'}",
+            f"Personality: {session.codex_settings.get('personality') or 'default'}",
+            f"Approval: {session.codex_settings.get('approval_policy') or 'default'}",
+            f"Sandbox: {session.codex_settings.get('sandbox_mode') or 'default'}",
+            f"Collab: {session.codex_settings.get('collaboration_mode') or 'default'}",
         ]
         self._safe_send_message(incoming.chat_id, "\n".join(lines), incoming.message_thread_id)
 
@@ -1341,7 +1341,7 @@ class TeledexApp:
         config = self.runner.read_config(Path(session.bound_path))
         effective = config.get("config") if isinstance(config, dict) else {}
         layers = config.get("layers") if isinstance(config, dict) else []
-        lines = ["Codex 配置摘要："]
+        lines = ["Codex configuration summary:"]
         if isinstance(effective, dict):
             for key in (
                 "model",
@@ -1356,7 +1356,7 @@ class TeledexApp:
                     lines.append(f"- {key}: {effective.get(key)}")
         if isinstance(layers, list) and layers:
             lines.append("")
-            lines.append("配置层：")
+            lines.append("Configuration layers:")
             for layer in layers:
                 if not isinstance(layer, dict):
                     continue
@@ -1373,9 +1373,9 @@ class TeledexApp:
             return
         servers = self.runner.list_mcp_servers(Path(session.bound_path))
         if not servers:
-            self._safe_send_message(incoming.chat_id, "当前没有 MCP 服务。", incoming.message_thread_id)
+            self._safe_send_message(incoming.chat_id, "No MCP servers are currently visible.", incoming.message_thread_id)
             return
-        lines = ["MCP 服务："]
+        lines = ["MCP servers:"]
         for server in servers:
             if not isinstance(server, dict):
                 continue
@@ -1391,9 +1391,9 @@ class TeledexApp:
             return
         apps = self.runner.list_apps(Path(session.bound_path), session.codex_thread_id)
         if not apps:
-            self._safe_send_message(incoming.chat_id, "当前没有可见 Apps。", incoming.message_thread_id)
+            self._safe_send_message(incoming.chat_id, "No visible apps are currently available.", incoming.message_thread_id)
             return
-        lines = ["Apps："]
+        lines = ["Apps:"]
         for app in apps:
             if not isinstance(app, dict):
                 continue
@@ -1411,9 +1411,9 @@ class TeledexApp:
             return
         skills = self.runner.list_skills(Path(session.bound_path))
         if not skills:
-            self._safe_send_message(incoming.chat_id, "当前目录没有检测到 Skills。", incoming.message_thread_id)
+            self._safe_send_message(incoming.chat_id, "No skills were detected in the current directory.", incoming.message_thread_id)
             return
-        lines = ["Skills："]
+        lines = ["Skills:"]
         for item in skills:
             if not isinstance(item, dict):
                 continue
@@ -1429,7 +1429,7 @@ class TeledexApp:
             return
         features = self.runner.list_experimental_features(Path(session.bound_path))
         if not features:
-            self._safe_send_message(incoming.chat_id, "当前没有实验特性列表。", incoming.message_thread_id)
+            self._safe_send_message(incoming.chat_id, "No experimental feature list is available right now.", incoming.message_thread_id)
             return
         lines = ["Experimental Features："]
         for item in features:
@@ -1463,11 +1463,11 @@ class TeledexApp:
         if result.returncode != 0 and detail.returncode != 0:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前目录不是 Git 仓库，或无法计算 diff。",
+                "The current directory is not a Git repository, or the diff could not be computed.",
                 incoming.message_thread_id,
             )
             return
-        text = (result.stdout.strip() + "\n\n" + detail.stdout.strip()).strip() or "当前没有改动。"
+        text = (result.stdout.strip() + "\n\n" + detail.stdout.strip()).strip() or "There are currently no changes."
         self._send_long_message(incoming.chat_id, text, incoming.message_thread_id)
 
     def _handle_codex_rollout_command(self, incoming: IncomingMessage, args: str) -> None:
@@ -1477,7 +1477,7 @@ class TeledexApp:
         if not session.codex_thread_id:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前会话还没有活动的 Codex 线程。",
+                "This session does not have an active Codex thread yet.",
                 incoming.message_thread_id,
             )
             return
@@ -1486,7 +1486,7 @@ class TeledexApp:
         path_text = str(thread.get("path") or "").strip()
         self._safe_send_message(
             incoming.chat_id,
-            path_text or "当前线程还没有 rollout 路径。",
+            path_text or "The current thread does not have a rollout path yet.",
             incoming.message_thread_id,
         )
 
@@ -1498,7 +1498,7 @@ class TeledexApp:
         if not excerpt:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前还没有可复制的最终回复。",
+                "There is no completed final reply to copy yet.",
                 incoming.message_thread_id,
             )
             return
@@ -1511,14 +1511,14 @@ class TeledexApp:
         if not session.codex_thread_id:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前会话还没有可 compact 的 Codex 线程。",
+                "This session does not have a Codex thread that can be compacted yet.",
                 incoming.message_thread_id,
             )
             return
         self.runner.compact_thread(Path(session.bound_path), session.codex_thread_id)
         self._safe_send_message(
             incoming.chat_id,
-            "已触发当前 Codex 线程的 compact。",
+            "Triggered compact on the current Codex thread.",
             incoming.message_thread_id,
         )
 
@@ -1529,14 +1529,14 @@ class TeledexApp:
         if not session.codex_thread_id:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前会话还没有活动的 Codex 线程。",
+                "This session does not have an active Codex thread yet.",
                 incoming.message_thread_id,
             )
             return
         self.runner.clean_background_terminals(Path(session.bound_path), session.codex_thread_id)
         self._safe_send_message(
             incoming.chat_id,
-            "已请求清理当前线程的后台终端。",
+            "Requested cleanup of background terminals for the current thread.",
             incoming.message_thread_id,
         )
 
@@ -1544,8 +1544,8 @@ class TeledexApp:
         self._safe_send_message(
             incoming.chat_id,
             (
-                f"{command} 已被识别为 Codex 内建命令，但当前 Telegram 桥接还没有对应的无弹窗实现。\n"
-                "它不会再被当成普通文本发给模型。"
+                f"{command} was recognized as a native Codex command, but the Telegram bridge does not support a silent implementation for it yet.\n"
+                "It will no longer be forwarded to the model as plain text."
             ),
             incoming.message_thread_id,
         )
@@ -1576,18 +1576,18 @@ class TeledexApp:
         runtime_deleted = self._clear_runtime_artifacts()
         summary = self.storage.wipe_user_data(incoming.user_id)
         lines = [
-            "已清空当前用户的 teledex 状态。",
-            f"删除会话：{summary.sessions_deleted}",
-            f"删除运行记录：{summary.runs_deleted}",
-            f"删除上下文映射：{summary.contexts_deleted}",
-            f"重置持久终端：{reset_terminals}",
-            f"清理运行时文件：{runtime_deleted}",
+            "Cleared all teledex state for the current user.",
+            f"Deleted sessions: {summary.sessions_deleted}",
+            f"Deleted runs: {summary.runs_deleted}",
+            f"Deleted context mappings: {summary.contexts_deleted}",
+            f"Reset persistent terminals: {reset_terminals}",
+            f"Deleted runtime artifacts: {runtime_deleted}",
         ]
         if stopped_runs > 0:
-            lines.append(f"已中断运行中的任务：{stopped_runs}")
+            lines.append(f"Stopped running tasks: {stopped_runs}")
         if cancelled_queued_runs > 0:
-            lines.append(f"已取消排队任务：{cancelled_queued_runs}")
-        lines.append("下一条消息会像全新使用一样重新开始。")
+            lines.append(f"Cancelled queued tasks: {cancelled_queued_runs}")
+        lines.append("The next message will start fresh, as if teledex were just opened.")
         self._safe_send_message(
             incoming.chat_id,
             "\n".join(lines),
@@ -1603,7 +1603,7 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
+                "No directory is bound yet. Use /tbind <absolute-path> first.",
                 incoming.message_thread_id,
             )
         return session
@@ -1615,7 +1615,7 @@ class TeledexApp:
         if not session.bound_path:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前会话还没有绑定目录，请先用 /tbind <绝对路径>。",
+                "No directory is currently bound to this session. Use /tbind <absolute-path> first.",
                 incoming.message_thread_id,
             )
             return None
@@ -1651,7 +1651,7 @@ class TeledexApp:
         if self._is_session_running(session.id):
             self._safe_send_message(
                 incoming.chat_id,
-                f"会话 #{session.id} 正在执行中，请稍后或先 /tstop 后再改 Codex 设置。",
+                f"Session #{session.id} is running. Change Codex settings after it finishes, or stop it first with /tstop.",
                 incoming.message_thread_id,
             )
             return
@@ -1659,7 +1659,7 @@ class TeledexApp:
         self._reset_session_thread(session.id)
         self._safe_send_message(
             incoming.chat_id,
-            f"{success_message}\n已为当前会话重置 Codex 线程，下一条消息会按新设置生效。",
+            f"{success_message}\nReset the Codex thread for the current session. The next message will use the new settings.",
             incoming.message_thread_id,
         )
 
@@ -1682,15 +1682,15 @@ class TeledexApp:
 
     def _format_model_status(self, session: SessionRecord) -> str:
         return (
-            f"当前模型：{session.codex_settings.get('model') or self.config.codex_model or 'default'}\n"
-            f"当前 effort：{session.codex_settings.get('reasoning_effort') or 'default'}\n"
-            "用法：/model list 或 /model <model> [effort]"
+            f"Current model: {session.codex_settings.get('model') or self.config.codex_model or 'default'}\n"
+            f"Current effort: {session.codex_settings.get('reasoning_effort') or 'default'}\n"
+            "Usage: /model list or /model <model> [effort]"
         )
 
     def _format_model_status_message(self, model: str, effort: str | None) -> str:
         target_model = "default" if model == "default" else model
         target_effort = "default" if effort in {None, 'default'} else effort
-        return f"模型已更新为：{target_model}\nReasoning effort：{target_effort}"
+        return f"Model updated to: {target_model}\nReasoning effort: {target_effort}"
 
     def _handle_prompt(self, incoming: IncomingMessage) -> None:
         session = self.storage.get_active_session(
@@ -1701,14 +1701,14 @@ class TeledexApp:
         if session is None:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前还没有绑定目录，请先用 /tbind <绝对路径>。",
+                "No directory is bound yet. Use /tbind <absolute-path> first.",
                 incoming.message_thread_id,
             )
             return
         if not session.bound_path:
             self._safe_send_message(
                 incoming.chat_id,
-                "当前会话还没有绑定目录，请先用 /tbind <绝对路径>。",
+                "No directory is currently bound to this session. Use /tbind <absolute-path> first.",
                 incoming.message_thread_id,
             )
             return
@@ -1809,7 +1809,7 @@ class TeledexApp:
         self.storage.finish_run(
             active_run.run_id,
             status="stopped",
-            error_message="会话已不存在",
+            error_message="The session no longer exists.",
         )
 
     def _thread_is_alive(self, worker: threading.Thread | None) -> bool:
@@ -1836,7 +1836,7 @@ class TeledexApp:
         preview_worker.start()
         try:
             if session.bound_path is None:
-                raise RuntimeError("会话未绑定目录")
+                raise RuntimeError("The session is not bound to a directory.")
 
             handle = self.runner.start(
                 prompt=active_run.prompt,
@@ -1883,17 +1883,17 @@ class TeledexApp:
             status = self.runner.wait(handle, _handle_event_line)
             if status.exit_code != 0:
                 if active_run.stop_requested:
-                    raise InterruptedError("任务已停止")
-                event_tail = self.runner.tail_event_log(handle.event_log_file) or "无事件日志"
+                    raise InterruptedError("The task was stopped.")
+                event_tail = self.runner.tail_event_log(handle.event_log_file) or "No event log available."
                 raise RuntimeError(
-                    f"Codex 退出码异常：{status.exit_code}\n最近事件：\n{event_tail}"
+                    f"Codex exited with an unexpected code: {status.exit_code}\nRecent events:\n{event_tail}"
                 )
 
             if not final_message:
                 final_message = self.runner.read_output_file(handle.output_file)
 
             if not final_message:
-                final_message = "已完成，但没有捕获到最终回复。"
+                final_message = "Completed, but no final reply was captured."
 
             self._stop_preview_loop(preview_stop_event, preview_worker)
             self._send_run_result(active_run, final_message, preview_state)
@@ -1907,11 +1907,11 @@ class TeledexApp:
             preview_state.finish("Stopped")
             self._stop_preview_loop(preview_stop_event, preview_worker)
             self._render_finished_preview(active_run, preview_state)
-            stop_reason = "后续消息已接管当前任务" if active_run.superseded_by_follow_up else "用户主动停止"
+            stop_reason = "A follow-up message took over the current task." if active_run.superseded_by_follow_up else "Stopped by the user."
             if not active_run.superseded_by_follow_up:
                 self._safe_send_message(
                     active_run.chat_id,
-                    f"会话 #{session.id} 的任务已停止。",
+                    f"The task in session #{session.id} was stopped.",
                     active_run.message_thread_id,
                 )
             self.storage.finish_run(
@@ -1927,7 +1927,7 @@ class TeledexApp:
             self._render_finished_preview(active_run, preview_state)
             self._safe_send_message(
                 active_run.chat_id,
-                f"会话 #{session.id} 执行失败：{exc}",
+                f"Session #{session.id} failed: {exc}",
                 active_run.message_thread_id,
             )
             self.storage.finish_run(
@@ -2175,7 +2175,7 @@ class TeledexApp:
         html_text = markdown_to_telegram_html(cleaned)
         if html_text and len(html_text) <= 3500:
             return html_text, "HTML"
-        plain_text = cleaned or "已完成，但没有可展示的最终回复。"
+        plain_text = cleaned or "Completed, but there was no final reply to display."
         if len(plain_text) <= plain_limit:
             return plain_text, None
         suffix = "\n\n[Truncated for length]"
