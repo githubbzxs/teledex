@@ -154,6 +154,61 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(sent[0]["parse_mode"], "HTML")
         self.assertIsNone(sent[0]["reply_to_message_id"])
 
+    def test_send_run_result_sends_generated_photo_before_final_message(self) -> None:
+        image_path = Path(self.temp_dir.name) / "result.png"
+        image_path.write_bytes(b"fake-image")
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+            generated_image_path=str(image_path),
+        )
+        calls: list[tuple[str, object]] = []
+
+        self.app._safe_delete_preview_message = lambda *args, **kwargs: True  # type: ignore[method-assign]
+
+        def fake_send_photo(
+            chat_id: int,
+            photo_path: str,
+            message_thread_id: int | None,
+            caption: str | None = None,
+            defer_on_rate_limit: bool = False,
+        ) -> object:
+            calls.append(("photo", photo_path))
+            return object()
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+            defer_on_rate_limit: bool = False,
+        ) -> TelegramMessage:
+            calls.append(("message", text))
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=789,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_photo = fake_send_photo  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._send_run_result(active_run, "最终回复")
+
+        self.assertEqual(
+            calls,
+            [
+                ("photo", str(image_path)),
+                ("message", "最终回复"),
+            ],
+        )
+
     def test_send_run_result_ignores_preview_state_footer_and_only_sends_final_message(self) -> None:
         active_run = ActiveRun(
             run_id=1,
@@ -995,6 +1050,44 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(prompts, [])
         self.assertEqual(commands, ["/tbind /root/demo"])
+
+    def test_handle_update_routes_photo_message_to_prompt_with_local_image_item(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        prompts: list[IncomingMessage] = []
+
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming)
+
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+        self.app._download_telegram_photo = lambda file_id: Path("/tmp/photo.jpg")  # type: ignore[method-assign]
+
+        self.app._handle_update(
+            {
+                "update_id": 31,
+                "message": {
+                    "message_id": 902,
+                    "caption": "请看看这张图",
+                    "photo": [
+                        {"file_id": "small", "width": 100, "height": 100, "file_size": 10},
+                        {"file_id": "large", "width": 1000, "height": 1000, "file_size": 100},
+                    ],
+                    "from": {"id": 1},
+                    "chat": {"id": 100},
+                    "message_thread_id": 9,
+                },
+            }
+        )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0].text, "请看看这张图")
+        self.assertEqual(
+            prompts[0].codex_input_items,
+            (
+                {"type": "text", "text": "请看看这张图"},
+                {"type": "local_image", "path": "/tmp/photo.jpg"},
+            ),
+        )
+        self.assertEqual(prompts[0].cleanup_paths, ("/tmp/photo.jpg",))
 
     def test_handle_update_skips_duplicate_processed_message(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)

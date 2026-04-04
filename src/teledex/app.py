@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -126,6 +127,8 @@ class IncomingMessage:
     text: str
     message_id: int
     message_thread_id: int | None
+    codex_input_items: tuple[dict[str, str], ...] = ()
+    cleanup_paths: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -136,10 +139,13 @@ class ActiveRun:
     chat_id: int
     message_thread_id: int | None
     prompt: str
+    codex_input_items: tuple[dict[str, str], ...] = ()
     preview_message_id: int | None = None
     preview_last_edit_at: float = 0.0
     preview_state: LivePreviewState | None = None
     process_handle: CodexProcessHandle | None = None
+    generated_image_path: str | None = None
+    cleanup_paths: tuple[str, ...] = ()
     stop_requested: bool = False
     superseded_by_follow_up: bool = False
 
@@ -592,27 +598,84 @@ class TeledexApp:
         except TelegramApiError:
             self.logger.exception("延迟发送 Telegram 消息失败")
 
+    def _schedule_delayed_photo_send(
+        self,
+        chat_id: int,
+        photo_path: str,
+        message_thread_id: int | None,
+        caption: str | None = None,
+        attempts_remaining: int = 2,
+    ) -> None:
+        worker = threading.Thread(
+            target=self._delayed_send_photo,
+            args=(
+                chat_id,
+                photo_path,
+                message_thread_id,
+                caption,
+                attempts_remaining,
+            ),
+            daemon=True,
+        )
+        worker.start()
+
+    def _delayed_send_photo(
+        self,
+        chat_id: int,
+        photo_path: str,
+        message_thread_id: int | None,
+        caption: str | None,
+        attempts_remaining: int,
+    ) -> None:
+        if attempts_remaining <= 0:
+            self.logger.error("Telegram 延迟图片重试次数已耗尽。")
+            return
+        if not self._wait_for_telegram_rate_limit(max_wait_seconds=900):
+            self.logger.error("Telegram 限流窗口过长，放弃延迟发送图片。")
+            return
+        try:
+            self.telegram.send_photo(
+                chat_id=chat_id,
+                photo_path=photo_path,
+                message_thread_id=message_thread_id,
+                caption=caption,
+            )
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning(
+                "Telegram 延迟图片仍被限流，%s 秒后继续重试，剩余 %s 次。",
+                delay,
+                attempts_remaining - 1,
+            )
+            self._schedule_delayed_photo_send(
+                chat_id,
+                photo_path,
+                message_thread_id,
+                caption=caption,
+                attempts_remaining=attempts_remaining - 1,
+            )
+        except TelegramApiError:
+            self.logger.exception("延迟发送 Telegram 图片失败")
+
     def _handle_update(self, update: dict) -> None:
         message = update.get("message")
         if not isinstance(message, dict):
             return
-        text = message.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return
-
         from_user = message.get("from") or {}
         user_id = int(from_user.get("id", 0))
         chat = message.get("chat") or {}
+        message_thread_id = (
+            int(message["message_thread_id"])
+            if message.get("message_thread_id") is not None
+            else None
+        )
+        display_text = self._extract_message_text(message) or "[photo]"
         incoming = IncomingMessage(
             chat_id=int(chat.get("id")),
             user_id=user_id,
-            text=text.strip(),
+            text=display_text,
             message_id=int(message.get("message_id")),
-            message_thread_id=(
-                int(message["message_thread_id"])
-                if message.get("message_thread_id") is not None
-                else None
-            ),
+            message_thread_id=message_thread_id,
         )
         update_id = int(update["update_id"]) if update.get("update_id") is not None else None
 
@@ -639,8 +702,35 @@ class TeledexApp:
                 chat_id=incoming.chat_id,
                 message_thread_id=incoming.message_thread_id,
             )
+            try:
+                incoming = self._build_incoming_message(message, incoming)
+            except TelegramApiError as exc:
+                self.logger.warning("处理 Telegram 媒体消息失败：%s", exc)
+                self._safe_send_message(
+                    incoming.chat_id,
+                    "Failed to download the Telegram photo. Please try again.",
+                    incoming.message_thread_id,
+                )
+                handled = True
+                incoming = None
+            if incoming is None:
+                if handled:
+                    self.storage.mark_message_processed(
+                        chat_id=int(chat.get("id")),
+                        message_id=int(message.get("message_id")),
+                        user_id=user_id,
+                        message_thread_id=message_thread_id,
+                        update_id=update_id,
+                        text=display_text,
+                    )
+                return
 
-            if incoming.text.startswith("//"):
+            has_local_image = any(
+                item.get("type") == "local_image" for item in incoming.codex_input_items
+            )
+            if has_local_image:
+                self._handle_prompt(self._normalize_incoming_message(incoming))
+            elif incoming.text.startswith("//"):
                 self._handle_prompt(self._normalize_incoming_message(incoming))
             elif incoming.text.startswith("/") and self._is_local_command(incoming.text):
                 self._handle_command(incoming)
@@ -660,15 +750,100 @@ class TeledexApp:
                 text=incoming.text,
             )
 
+    def _extract_message_text(self, message: dict) -> str:
+        for key in ("text", "caption"):
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _build_incoming_message(
+        self,
+        message: dict,
+        metadata: IncomingMessage,
+    ) -> IncomingMessage | None:
+        text = self._extract_message_text(message)
+        photo_path = self._extract_and_download_photo(message)
+        if not text and photo_path is None:
+            return None
+        prompt_text = text or "Please inspect the attached image."
+        input_items: list[dict[str, str]] = [{"type": "text", "text": prompt_text}]
+        cleanup_paths: list[str] = []
+        if photo_path is not None:
+            input_items.append({"type": "local_image", "path": str(photo_path)})
+            cleanup_paths.append(str(photo_path))
+        return IncomingMessage(
+            chat_id=metadata.chat_id,
+            user_id=metadata.user_id,
+            text=prompt_text,
+            message_id=metadata.message_id,
+            message_thread_id=metadata.message_thread_id,
+            codex_input_items=tuple(input_items),
+            cleanup_paths=tuple(cleanup_paths),
+        )
+
+    def _extract_and_download_photo(self, message: dict) -> Path | None:
+        photo_sizes = message.get("photo")
+        if not isinstance(photo_sizes, list):
+            return None
+        best_photo: dict | None = None
+        best_rank = (-1, -1, -1)
+        for raw_photo in photo_sizes:
+            if not isinstance(raw_photo, dict):
+                continue
+            file_id = str(raw_photo.get("file_id") or "").strip()
+            if not file_id:
+                continue
+            rank = (
+                int(raw_photo.get("file_size") or 0),
+                int(raw_photo.get("width") or 0) * int(raw_photo.get("height") or 0),
+                int(raw_photo.get("width") or 0),
+            )
+            if rank >= best_rank:
+                best_rank = rank
+                best_photo = raw_photo
+        if best_photo is None:
+            return None
+        file_id = str(best_photo.get("file_id") or "").strip()
+        if not file_id:
+            return None
+        return self._download_telegram_photo(file_id)
+
+    def _download_telegram_photo(self, file_id: str) -> Path:
+        file_info = self.telegram.get_file(file_id)
+        file_path = str(file_info.get("file_path") or "").strip()
+        if not file_path:
+            raise TelegramApiError("Telegram file 响应缺少 file_path")
+        payload = self.telegram.download_file(file_path)
+        runtime_dir = self.config.state_dir / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(file_path).suffix or ".jpg"
+        local_path = Path(
+            tempfile.mkstemp(prefix="telegram-photo-", suffix=suffix, dir=runtime_dir)[1]
+        )
+        local_path.write_bytes(payload)
+        return local_path
+
     def _normalize_incoming_message(self, incoming: IncomingMessage) -> IncomingMessage:
         if not incoming.text.startswith("//"):
             return incoming
+        normalized_text = "/" + incoming.text[2:]
+        normalized_items = tuple(
+            (
+                {"type": "text", "text": normalized_text}
+                if item.get("type") == "text" and item.get("text") == incoming.text
+                else dict(item)
+            )
+            for item in incoming.codex_input_items
+        )
         return IncomingMessage(
             chat_id=incoming.chat_id,
             user_id=incoming.user_id,
-            text="/" + incoming.text[2:],
+            text=normalized_text,
             message_id=incoming.message_id,
             message_thread_id=incoming.message_thread_id,
+            codex_input_items=normalized_items,
+            cleanup_paths=incoming.cleanup_paths,
         )
 
     def _handle_command(self, incoming: IncomingMessage) -> None:
@@ -1733,8 +1908,10 @@ class TeledexApp:
             chat_id=incoming.chat_id,
             message_thread_id=incoming.message_thread_id,
             prompt=incoming.text,
+            codex_input_items=incoming.codex_input_items,
             preview_message_id=preview.message_id if preview else None,
             preview_state=preview_state,
+            cleanup_paths=incoming.cleanup_paths,
         )
         worker: threading.Thread | None = None
         interrupted_handle: CodexProcessHandle | None = None
@@ -1845,6 +2022,7 @@ class TeledexApp:
                 runtime_dir=self.config.state_dir / "runtime",
                 session_id=session.id,
                 settings=session.codex_settings,
+                input_items=active_run.codex_input_items,
             )
             with self._active_runs_lock:
                 current = self._active_runs.get(session.id)
@@ -1860,6 +2038,8 @@ class TeledexApp:
                     self.storage.update_session_thread_id(session.id, parsed.thread_id)
                 if parsed.final_message:
                     final_message = parsed.final_message
+                if parsed.generated_image_path:
+                    active_run.generated_image_path = parsed.generated_image_path
                 if parsed.commentary_id and parsed.commentary_text:
                     preview_state.update_commentary(
                         parsed.commentary_id,
@@ -1955,6 +2135,11 @@ class TeledexApp:
                     active_run.process_handle.prompt_file.unlink(missing_ok=True)
                 except OSError:
                     self.logger.warning("清理 Codex 提示词文件失败：%s", active_run.process_handle.prompt_file)
+            for cleanup_path in active_run.cleanup_paths:
+                try:
+                    Path(cleanup_path).unlink(missing_ok=True)
+                except OSError:
+                    self.logger.warning("清理 Telegram 临时媒体文件失败：%s", cleanup_path)
 
     def _is_session_running(self, session_id: int) -> bool:
         with self._active_runs_lock:
@@ -2160,6 +2345,13 @@ class TeledexApp:
     ) -> None:
         del preview_state
         self._safe_delete_preview_message(active_run, defer_on_rate_limit=True)
+        if active_run.generated_image_path and Path(active_run.generated_image_path).exists():
+            self._safe_send_photo(
+                active_run.chat_id,
+                active_run.generated_image_path,
+                active_run.message_thread_id,
+                defer_on_rate_limit=True,
+            )
         final_text, parse_mode = self._build_final_result_message(text)
         self._safe_send_message(
             active_run.chat_id,
@@ -2341,6 +2533,45 @@ class TeledexApp:
             return None
         except TelegramApiError:
             self.logger.exception("发送 Telegram 消息失败")
+            return None
+
+    def _safe_send_photo(
+        self,
+        chat_id: int,
+        photo_path: str,
+        message_thread_id: int | None,
+        caption: str | None = None,
+        defer_on_rate_limit: bool = False,
+    ) -> TelegramMessage | None:
+        if self._telegram_rate_limit_remaining_seconds() > 0:
+            if defer_on_rate_limit:
+                self._schedule_delayed_photo_send(
+                    chat_id,
+                    photo_path,
+                    message_thread_id,
+                    caption=caption,
+                )
+            return None
+        try:
+            return self.telegram.send_photo(
+                chat_id=chat_id,
+                photo_path=photo_path,
+                message_thread_id=message_thread_id,
+                caption=caption,
+            )
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning("Telegram 图片发送触发限流，%s 秒内暂停发送。", delay)
+            if defer_on_rate_limit:
+                self._schedule_delayed_photo_send(
+                    chat_id,
+                    photo_path,
+                    message_thread_id,
+                    caption=caption,
+                )
+            return None
+        except TelegramApiError:
+            self.logger.exception("发送 Telegram 图片失败")
             return None
 
     def _send_long_message(

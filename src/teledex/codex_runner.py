@@ -77,6 +77,7 @@ class ParsedCodexEvent:
     tool_output_text: str | None = None
     thread_id: str | None = None
     final_message: str | None = None
+    generated_image_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -167,6 +168,7 @@ class CodexRunner:
         runtime_dir: Path,
         session_id: int,
         settings: dict[str, Any] | None = None,
+        input_items: tuple[dict[str, str], ...] | None = None,
     ) -> CodexProcessHandle:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         output_file = Path(
@@ -203,6 +205,7 @@ class CodexRunner:
             prompt=prompt,
             thread_id=thread_id,
             settings=settings or {},
+            input_items=input_items,
         )
         return handle
 
@@ -322,6 +325,16 @@ class CodexRunner:
                             tool_call_id=item_id,
                             tool_command_text=command or None,
                             tool_output_text=aggregated_output or None,
+                        )
+                    )
+                return _with_footer(ParsedCodexEvent(status_text="Thinking"))
+            if item_type == "image_generation":
+                saved_path = str(item.get("savedPath") or item.get("saved_path") or "").strip()
+                if saved_path:
+                    return _with_footer(
+                        ParsedCodexEvent(
+                            status_text="Thinking",
+                            generated_image_path=saved_path,
                         )
                     )
                 return _with_footer(ParsedCodexEvent(status_text="Thinking"))
@@ -776,6 +789,7 @@ class CodexRunner:
         prompt: str,
         thread_id: str | None,
         settings: dict[str, Any],
+        input_items: tuple[dict[str, str], ...] | None,
     ) -> None:
         with runtime.state_lock:
             if runtime.turn_worker is not None and runtime.turn_worker.is_alive():
@@ -785,7 +799,7 @@ class CodexRunner:
             runtime.pending_aux_request_ids.clear()
             worker = threading.Thread(
                 target=self._run_runtime_turn,
-                args=(runtime, handle, prompt, thread_id, settings),
+                args=(runtime, handle, prompt, thread_id, settings, input_items),
                 daemon=True,
             )
             runtime.turn_worker = worker
@@ -798,6 +812,7 @@ class CodexRunner:
         prompt: str,
         thread_id: str | None,
         settings: dict[str, Any],
+        input_items: tuple[dict[str, str], ...] | None,
     ) -> None:
         event_writer = handle.event_log_file.open("a", encoding="utf-8")
         final_response = ""
@@ -830,6 +845,7 @@ class CodexRunner:
                     args,
                     self._runtime_model(runtime),
                     _extract_reasoning_effort(runtime.status_line_state or {}),
+                    input_items=input_items,
                 ),
             )
             request_acked = False

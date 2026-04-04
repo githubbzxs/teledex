@@ -172,6 +172,23 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertEqual(parsed.tool_call_id, "call_1")
         self.assertEqual(parsed.tool_command_text, "/bin/bash -lc 'pwd'")
 
+    def test_parse_event_line_supports_image_generation_saved_path(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "image_generation",
+                        "id": "img_1",
+                        "savedPath": "/tmp/output.png",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.generated_image_path, "/tmp/output.png")
+
     def test_parse_event_line_only_marks_final_message_on_completed_agent_message(self) -> None:
         parsed = self.runner.parse_event_line(
             json.dumps(
