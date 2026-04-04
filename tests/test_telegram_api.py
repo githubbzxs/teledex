@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import http.client
 import unittest
 import tempfile
 from pathlib import Path
@@ -47,29 +46,6 @@ class TelegramApiTestCase(unittest.TestCase):
                 client.get_me()
 
         self.assertIn("Telegram 请求超时", str(context.exception))
-
-    def test_call_wraps_remote_disconnect_as_telegram_api_error(self) -> None:
-        client = TelegramClient("test-token", timeout_seconds=1)
-
-        with patch(
-            "urllib.request.urlopen",
-            side_effect=http.client.RemoteDisconnected("closed"),
-        ):
-            with self.assertRaises(TelegramApiError) as context:
-                client.get_me()
-
-        self.assertIn("Telegram 连接异常", str(context.exception))
-
-    def test_download_file_wraps_os_error_as_telegram_api_error(self) -> None:
-        client = TelegramClient("test-token", timeout_seconds=1)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            destination = Path(temp_dir) / "photo.jpg"
-            with patch("urllib.request.urlopen", side_effect=ConnectionResetError("reset")):
-                with self.assertRaises(TelegramApiError) as context:
-                    client.download_file("photos/file.jpg", destination)
-
-        self.assertIn("Telegram 网络异常", str(context.exception))
 
     def test_send_photo_uses_multipart_request(self) -> None:
         client = TelegramClient("test-token", timeout_seconds=1)

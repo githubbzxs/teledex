@@ -99,31 +99,6 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIsNone(calls[0]["reply_to_message_id"])
         self.assertEqual(str(calls[0]["text"]), "○ Thinking (0s)")
 
-    def test_safe_send_chat_action_swallows_unexpected_network_error(self) -> None:
-        self.app.telegram.send_chat_action = lambda **kwargs: (_ for _ in ()).throw(
-            ConnectionResetError("reset")
-        )  # type: ignore[method-assign]
-
-        self.app._safe_send_chat_action(100, "typing", 9)
-
-    def test_edit_preview_message_returns_false_on_unexpected_network_error(self) -> None:
-        active_run = ActiveRun(
-            run_id=1,
-            session_id=1,
-            user_id=1,
-            chat_id=100,
-            message_thread_id=9,
-            prompt="任务",
-            preview_message_id=456,
-        )
-        self.app.telegram.edit_message_text = lambda **kwargs: (_ for _ in ()).throw(
-            ConnectionResetError("reset")
-        )  # type: ignore[method-assign]
-
-        result = self.app._edit_preview_message(active_run, "preview")
-
-        self.assertFalse(result)
-
     def test_send_run_result_deletes_preview_and_sends_new_final_message(self) -> None:
         active_run = ActiveRun(
             run_id=1,

@@ -2266,9 +2266,6 @@ class TeledexApp:
                 return True
             self.logger.exception("更新预览消息失败")
             return False
-        except Exception:
-            self.logger.exception("更新预览消息时出现未预期异常")
-            return False
 
     def _render_finished_preview(
         self,
@@ -2368,8 +2365,6 @@ class TeledexApp:
             self.logger.warning("Telegram chat action 触发限流，%s 秒内暂停发送。", delay)
         except TelegramApiError:
             self.logger.debug("发送 Telegram chat action 失败", exc_info=True)
-        except Exception:
-            self.logger.debug("发送 Telegram chat action 出现未预期异常", exc_info=True)
 
     def _schedule_delayed_preview_delete(
         self,
