@@ -645,39 +645,10 @@ def _build_turn_start_params(
     args: argparse.Namespace,
     fallback_model: str | None,
     fallback_effort: str | None,
-    input_items: tuple[dict[str, str], ...] | None = None,
 ) -> dict[str, Any]:
-    normalized_input: list[dict[str, Any]] = []
-    for raw_item in input_items or ():
-        if not isinstance(raw_item, dict):
-            continue
-        item_type = str(raw_item.get("type") or "").strip()
-        if item_type == "text":
-            text = str(raw_item.get("text") or "").strip()
-            if not text:
-                continue
-            normalized_input.append(
-                {
-                    "type": "text",
-                    "text": text,
-                    "text_elements": [],
-                }
-            )
-            continue
-        if item_type in {"local_image", "localImage"}:
-            path = str(raw_item.get("path") or "").strip()
-            if not path:
-                continue
-            normalized_input.append(
-                {
-                    "type": "local_image",
-                    "path": path,
-                }
-            )
     params: dict[str, Any] = {
         "threadId": thread_id,
-        "input": normalized_input
-        or [
+        "input": [
             {
                 "type": "text",
                 "text": prompt,

@@ -5,7 +5,6 @@ from pathlib import Path
 
 from teledex.codex_app_server_exec import (
     _build_footer_statusline,
-    _build_turn_start_params,
     _execution_overrides,
     _extract_reasoning_effort,
     _extract_status_line_items,
@@ -13,41 +12,6 @@ from teledex.codex_app_server_exec import (
 
 
 class CodexAppServerExecTestCase(unittest.TestCase):
-    def test_build_turn_start_params_supports_local_image_items(self) -> None:
-        class _Args:
-            model = None
-            service_tier = None
-            reasoning_effort = None
-            personality = None
-            collaboration_mode = None
-
-        params = _build_turn_start_params(
-            "thread-1",
-            "请看图",
-            _Args(),
-            fallback_model=None,
-            fallback_effort=None,
-            input_items=(
-                {"type": "text", "text": "请看图"},
-                {"type": "local_image", "path": "/tmp/demo.png"},
-            ),
-        )
-
-        self.assertEqual(
-            params["input"],
-            [
-                {
-                    "type": "text",
-                    "text": "请看图",
-                    "text_elements": [],
-                },
-                {
-                    "type": "local_image",
-                    "path": "/tmp/demo.png",
-                },
-            ],
-        )
-
     def test_execution_overrides_keeps_local_permissions_in_default_mode(self) -> None:
         self.assertEqual(_execution_overrides("default"), {})
 

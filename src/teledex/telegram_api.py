@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import json
-import mimetypes
-import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 
@@ -33,7 +30,6 @@ class TelegramMessage:
 class TelegramClient:
     def __init__(self, token: str, timeout_seconds: int = 60) -> None:
         self.base_url = f"https://api.telegram.org/bot{token}/"
-        self.file_base_url = f"https://api.telegram.org/file/bot{token}/"
         self.timeout_seconds = timeout_seconds
 
     def get_me(self) -> dict[str, Any]:
@@ -124,63 +120,6 @@ class TelegramClient:
             payload["message_thread_id"] = message_thread_id
         self._call("sendChatAction", payload)
 
-    def get_file(self, file_id: str) -> dict[str, Any]:
-        return self._call("getFile", {"file_id": file_id})
-
-    def download_file(self, file_path: str) -> bytes:
-        request = urllib.request.Request(
-            url=f"{self.file_base_url}{file_path.lstrip('/')}",
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                return response.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            retry_after = _extract_retry_after_seconds(detail)
-            if retry_after is not None:
-                raise TelegramRateLimitError(
-                    f"Telegram HTTP 错误: {detail}",
-                    retry_after_seconds=retry_after,
-                ) from exc
-            raise TelegramApiError(f"Telegram HTTP 错误: {detail}") from exc
-        except TimeoutError as exc:
-            raise TelegramApiError(f"Telegram 请求超时: {exc}") from exc
-        except urllib.error.URLError as exc:
-            raise TelegramApiError(f"Telegram 连接失败: {exc}") from exc
-
-    def send_photo(
-        self,
-        chat_id: int,
-        photo_path: str,
-        message_thread_id: int | None = None,
-        caption: str | None = None,
-    ) -> TelegramMessage:
-        payload: dict[str, Any] = {"chat_id": chat_id}
-        if message_thread_id is not None:
-            payload["message_thread_id"] = message_thread_id
-        if caption:
-            payload["caption"] = caption
-        photo_file = Path(photo_path)
-        mime_type = mimetypes.guess_type(photo_file.name)[0] or "application/octet-stream"
-        result = self._call_multipart(
-            "sendPhoto",
-            payload,
-            file_field="photo",
-            filename=photo_file.name,
-            content_type=mime_type,
-            file_bytes=photo_file.read_bytes(),
-        )
-        return TelegramMessage(
-            chat_id=int(result["chat"]["id"]),
-            message_id=int(result["message_id"]),
-            message_thread_id=(
-                int(result["message_thread_id"])
-                if result.get("message_thread_id") is not None
-                else None
-            ),
-        )
-
     def set_my_commands(
         self,
         commands: list[tuple[str, str]] | tuple[tuple[str, str], ...],
@@ -212,73 +151,6 @@ class TelegramClient:
             url=f"{self.base_url}{method}",
             data=data,
             headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=timeout if timeout is not None else self.timeout_seconds,
-            ) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            retry_after = _extract_retry_after_seconds(detail)
-            if retry_after is not None:
-                raise TelegramRateLimitError(
-                    f"Telegram HTTP 错误: {detail}",
-                    retry_after_seconds=retry_after,
-                ) from exc
-            raise TelegramApiError(f"Telegram HTTP 错误: {detail}") from exc
-        except TimeoutError as exc:
-            raise TelegramApiError(f"Telegram 请求超时: {exc}") from exc
-        except urllib.error.URLError as exc:
-            raise TelegramApiError(f"Telegram 连接失败: {exc}") from exc
-
-        if not body.get("ok"):
-            retry_after = _extract_retry_after_seconds(body)
-            if retry_after is not None:
-                raise TelegramRateLimitError(
-                    f"Telegram API 返回失败: {body}",
-                    retry_after_seconds=retry_after,
-                )
-            raise TelegramApiError(f"Telegram API 返回失败: {body}")
-        return body["result"]
-
-    def _call_multipart(
-        self,
-        method: str,
-        payload: dict[str, Any],
-        *,
-        file_field: str,
-        filename: str,
-        content_type: str,
-        file_bytes: bytes,
-        timeout: int | None = None,
-    ) -> Any:
-        boundary = f"----teledex-{uuid.uuid4().hex}"
-        body = bytearray()
-        for key, value in payload.items():
-            body.extend(f"--{boundary}\r\n".encode("utf-8"))
-            body.extend(
-                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8")
-            )
-            body.extend(str(value).encode("utf-8"))
-            body.extend(b"\r\n")
-        body.extend(f"--{boundary}\r\n".encode("utf-8"))
-        body.extend(
-            (
-                f'Content-Disposition: form-data; name="{file_field}"; '
-                f'filename="{filename}"\r\n'
-            ).encode("utf-8")
-        )
-        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
-        body.extend(file_bytes)
-        body.extend(b"\r\n")
-        body.extend(f"--{boundary}--\r\n".encode("utf-8"))
-        request = urllib.request.Request(
-            url=f"{self.base_url}{method}",
-            data=bytes(body),
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
         )
         try:
