@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .codex_runner import CodexProcessHandle, CodexRunner
@@ -16,7 +17,7 @@ from .formatting import (
     markdown_to_telegram_html,
     split_markdown_message,
 )
-from .storage import SessionRecord, Storage
+from .storage import PendingTelegramMessage, SessionRecord, Storage
 from .telegram_api import (
     TelegramApiError,
     TelegramClient,
@@ -46,6 +47,9 @@ _PREVIEW_OUTPUT_MAX_CHARS = 2200
 _PREVIEW_MESSAGE_MAX_CHARS = 3800
 _PREVIEW_LOOP_IDLE_SECONDS = 0.1
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
+_PENDING_MESSAGE_IDLE_SLEEP_SECONDS = 2.0
+_PENDING_MESSAGE_MAX_SLEEP_SECONDS = 30.0
+_PENDING_MESSAGE_BATCH_SIZE = 20
 _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "Show help"),
     ("tbind", "Bind directory"),
@@ -433,6 +437,25 @@ def _format_elapsed_compact(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(tz=UTC).isoformat(timespec="seconds")
+
+
+def _utc_after_delay_iso(delay_seconds: float) -> str:
+    delay = max(0.0, float(delay_seconds))
+    return (datetime.now(tz=UTC) + timedelta(seconds=delay)).isoformat(timespec="seconds")
+
+
+def _seconds_until_iso_timestamp(timestamp: str) -> float:
+    try:
+        due_at = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return 0.0
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=UTC)
+    return max(0.0, (due_at - datetime.now(tz=UTC)).total_seconds())
+
+
 def _normalize_preview_interval(seconds: float) -> float:
     return max(0.2, float(seconds))
 
@@ -467,6 +490,8 @@ class TeledexApp:
         self._telegram_rate_limit_lock = threading.RLock()
         self._telegram_rate_limit_until = 0.0
         self._preview_edit_lock = threading.RLock()
+        self._pending_message_worker_lock = threading.RLock()
+        self._pending_message_worker_started = False
         if recovered_runs > 0:
             self.logger.warning("服务启动时回收了 %s 个遗留运行中的会话。", recovered_runs)
 
@@ -484,6 +509,7 @@ class TeledexApp:
         bot = self.telegram.get_me()
         self.logger.info("Telegram bot 已连接: @%s", bot.get("username", "unknown"))
         self._sync_bot_commands()
+        self._start_pending_message_worker()
         while True:
             try:
                 updates = self.telegram.get_updates(
@@ -528,69 +554,108 @@ class TeledexApp:
         time.sleep(remaining)
         return True
 
+    def _start_pending_message_worker(self) -> None:
+        with self._pending_message_worker_lock:
+            if self._pending_message_worker_started:
+                return
+            worker = threading.Thread(
+                target=self._pending_message_worker_loop,
+                args=(),
+                daemon=True,
+            )
+            worker.start()
+            self._pending_message_worker_started = True
+
     def _schedule_delayed_message_send(
         self,
+        user_id: int | None,
         chat_id: int,
         text: str,
         message_thread_id: int | None,
         reply_to_message_id: int | None = None,
         parse_mode: str | None = None,
-        attempts_remaining: int = 2,
     ) -> None:
-        worker = threading.Thread(
-            target=self._delayed_send_message,
-            args=(
-                chat_id,
-                text,
-                message_thread_id,
-                reply_to_message_id,
-                parse_mode,
-                attempts_remaining,
-            ),
-            daemon=True,
+        delay = self._telegram_rate_limit_remaining_seconds()
+        due_at = _utc_after_delay_iso(delay)
+        pending_id = self.storage.enqueue_pending_telegram_message(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=message_thread_id,
+            reply_to_message_id=reply_to_message_id,
+            parse_mode=parse_mode,
+            due_at=due_at,
         )
-        worker.start()
+        self.logger.warning(
+            "Telegram 消息已加入延迟发送队列：id=%s due_at=%s",
+            pending_id,
+            due_at,
+        )
 
-    def _delayed_send_message(
-        self,
-        chat_id: int,
-        text: str,
-        message_thread_id: int | None,
-        reply_to_message_id: int | None,
-        parse_mode: str | None,
-        attempts_remaining: int,
-    ) -> None:
-        if attempts_remaining <= 0:
-            self.logger.error("Telegram 延迟消息重试次数已耗尽。")
+    def _sleep_until_next_pending_message(self) -> None:
+        next_due_at = self.storage.get_next_pending_telegram_message_due_at()
+        if not next_due_at:
+            time.sleep(_PENDING_MESSAGE_IDLE_SLEEP_SECONDS)
             return
-        if not self._wait_for_telegram_rate_limit(max_wait_seconds=900):
-            self.logger.error("Telegram 限流窗口过长，放弃延迟发送消息。")
-            return
+        delay = _seconds_until_iso_timestamp(next_due_at)
+        time.sleep(max(0.2, min(delay or 0.2, _PENDING_MESSAGE_MAX_SLEEP_SECONDS)))
+
+    def _pending_message_worker_loop(self) -> None:
+        while True:
+            try:
+                if self._telegram_rate_limit_remaining_seconds() > 0:
+                    time.sleep(
+                        min(
+                            self._telegram_rate_limit_remaining_seconds(),
+                            _PENDING_MESSAGE_MAX_SLEEP_SECONDS,
+                        )
+                    )
+                    continue
+                if self._process_pending_telegram_messages_once():
+                    continue
+                self._sleep_until_next_pending_message()
+            except Exception:
+                self.logger.exception("Telegram 延迟消息 worker 异常")
+                time.sleep(3)
+
+    def _process_pending_telegram_messages_once(self) -> bool:
+        pending_messages = self.storage.list_due_pending_telegram_messages(
+            due_before=_utc_now_iso(),
+            limit=_PENDING_MESSAGE_BATCH_SIZE,
+        )
+        if not pending_messages:
+            return False
+        for pending_message in pending_messages:
+            if self._telegram_rate_limit_remaining_seconds() > 0:
+                break
+            self._deliver_pending_telegram_message(pending_message)
+        return True
+
+    def _deliver_pending_telegram_message(self, pending_message: PendingTelegramMessage) -> None:
         try:
             self.telegram.send_message(
-                chat_id=chat_id,
-                text=text,
-                message_thread_id=message_thread_id,
-                reply_to_message_id=reply_to_message_id,
-                parse_mode=parse_mode,
+                chat_id=pending_message.chat_id,
+                text=pending_message.text,
+                message_thread_id=pending_message.message_thread_id,
+                reply_to_message_id=pending_message.reply_to_message_id,
+                parse_mode=pending_message.parse_mode,
             )
+            self.storage.delete_pending_telegram_message(pending_message.id)
+            self.logger.info("Telegram 延迟消息发送成功：id=%s", pending_message.id)
         except TelegramRateLimitError as exc:
             delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
-            self.logger.warning(
-                "Telegram 延迟消息仍被限流，%s 秒后继续重试，剩余 %s 次。",
-                delay,
-                attempts_remaining - 1,
+            self.storage.reschedule_pending_telegram_message(
+                pending_message.id,
+                _utc_after_delay_iso(delay),
             )
-            self._schedule_delayed_message_send(
-                chat_id,
-                text,
-                message_thread_id,
-                reply_to_message_id=reply_to_message_id,
-                parse_mode=parse_mode,
-                attempts_remaining=attempts_remaining - 1,
+            self.logger.warning(
+                "Telegram 延迟消息仍被限流，%s 秒后继续重试：id=%s",
+                delay,
+                pending_message.id,
             )
         except TelegramApiError:
-            self.logger.exception("延迟发送 Telegram 消息失败")
+            self.logger.exception("延迟发送 Telegram 消息失败，已丢弃：id=%s", pending_message.id)
+            self.storage.delete_pending_telegram_message(pending_message.id)
 
     def _handle_update(self, update: dict) -> None:
         message = update.get("message")
@@ -2162,9 +2227,10 @@ class TeledexApp:
         self._safe_delete_preview_message(active_run, defer_on_rate_limit=True)
         final_text, parse_mode = self._build_final_result_message(text)
         self._safe_send_message(
-            active_run.chat_id,
-            final_text,
-            active_run.message_thread_id,
+            user_id=active_run.user_id,
+            chat_id=active_run.chat_id,
+            text=final_text,
+            message_thread_id=active_run.message_thread_id,
             parse_mode=parse_mode,
             defer_on_rate_limit=True,
         )
@@ -2308,10 +2374,12 @@ class TeledexApp:
         reply_to_message_id: int | None = None,
         parse_mode: str | None = None,
         defer_on_rate_limit: bool = False,
+        user_id: int | None = None,
     ) -> TelegramMessage | None:
         if self._telegram_rate_limit_remaining_seconds() > 0:
             if defer_on_rate_limit:
                 self._schedule_delayed_message_send(
+                    user_id,
                     chat_id,
                     text,
                     message_thread_id,
@@ -2332,6 +2400,7 @@ class TeledexApp:
             self.logger.warning("Telegram 消息发送触发限流，%s 秒内暂停发送。", delay)
             if defer_on_rate_limit:
                 self._schedule_delayed_message_send(
+                    user_id,
                     chat_id,
                     text,
                     message_thread_id,

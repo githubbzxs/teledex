@@ -155,6 +155,40 @@ class StorageTestCase(unittest.TestCase):
 
         self.assertTrue(self.storage.has_processed_message(100, 200))
 
+    def test_pending_telegram_message_can_be_enqueued_rescheduled_and_deleted(self) -> None:
+        due_at = "2026-04-04T13:30:00+00:00"
+        pending_id = self.storage.enqueue_pending_telegram_message(
+            user_id=1,
+            chat_id=100,
+            text="待发送消息",
+            message_thread_id=9,
+            reply_to_message_id=88,
+            parse_mode="HTML",
+            due_at=due_at,
+        )
+
+        due_messages = self.storage.list_due_pending_telegram_messages(
+            due_before="2026-04-04T13:31:00+00:00",
+            limit=10,
+        )
+
+        self.assertEqual(len(due_messages), 1)
+        self.assertEqual(due_messages[0].id, pending_id)
+        self.assertEqual(due_messages[0].user_id, 1)
+        self.assertEqual(due_messages[0].message_thread_id, 9)
+        self.assertEqual(due_messages[0].reply_to_message_id, 88)
+        self.assertEqual(self.storage.get_next_pending_telegram_message_due_at(), due_at)
+
+        rescheduled_due_at = "2026-04-04T14:00:00+00:00"
+        self.storage.reschedule_pending_telegram_message(pending_id, rescheduled_due_at)
+        self.assertEqual(
+            self.storage.get_next_pending_telegram_message_due_at(),
+            rescheduled_due_at,
+        )
+
+        self.storage.delete_pending_telegram_message(pending_id)
+        self.assertIsNone(self.storage.get_next_pending_telegram_message_due_at())
+
     def test_reconcile_interrupted_runs_marks_running_runs_stopped(self) -> None:
         self.storage.ensure_user(11, chat_id=104, message_thread_id=8)
         session = self.storage.create_session(11, "会话")

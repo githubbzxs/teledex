@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -127,6 +128,7 @@ class AppMessagingTestCase(unittest.TestCase):
             reply_to_message_id: int | None = None,
             parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
+            user_id: int | None = None,
         ) -> TelegramMessage:
             sent.append(
                 {
@@ -177,6 +179,7 @@ class AppMessagingTestCase(unittest.TestCase):
             reply_to_message_id: int | None = None,
             parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
+            user_id: int | None = None,
         ) -> TelegramMessage:
             sent.append(
                 {
@@ -223,6 +226,7 @@ class AppMessagingTestCase(unittest.TestCase):
             reply_to_message_id: int | None = None,
             parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
+            user_id: int | None = None,
         ) -> TelegramMessage:
             sent.append(
                 {
@@ -282,6 +286,7 @@ class AppMessagingTestCase(unittest.TestCase):
             reply_to_message_id: int | None = None,
             parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
+            user_id: int | None = None,
         ) -> TelegramMessage:
             sent.append(text)
             return TelegramMessage(
@@ -421,6 +426,7 @@ class AppMessagingTestCase(unittest.TestCase):
             reply_to_message_id: int | None = None,
             parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
+            user_id: int | None = None,
         ) -> TelegramMessage:
             calls.append(str(text))
             return TelegramMessage(
@@ -439,16 +445,10 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("最终回复", calls[1])
 
     def test_safe_send_message_can_schedule_retry_when_rate_limited(self) -> None:
-        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-
         def fake_send_message(**kwargs) -> TelegramMessage:
             raise TelegramRateLimitError("限流", retry_after_seconds=15)
 
-        def fake_schedule_delayed_message_send(*args, **kwargs) -> None:
-            calls.append((args, kwargs))
-
         self.app.telegram.send_message = fake_send_message  # type: ignore[method-assign]
-        self.app._schedule_delayed_message_send = fake_schedule_delayed_message_send  # type: ignore[method-assign]
 
         result = self.app._safe_send_message(
             100,
@@ -456,11 +456,86 @@ class AppMessagingTestCase(unittest.TestCase):
             9,
             parse_mode="HTML",
             defer_on_rate_limit=True,
+            user_id=1,
         )
 
         self.assertIsNone(result)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0][:3], (100, "最终回复", 9))
+        pending = self.app.storage.list_due_pending_telegram_messages(
+            due_before=(datetime.now(tz=UTC) + timedelta(minutes=1)).isoformat(timespec="seconds"),
+            limit=10,
+        )
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].user_id, 1)
+        self.assertEqual(pending[0].chat_id, 100)
+        self.assertEqual(pending[0].text, "最终回复")
+        self.assertEqual(pending[0].parse_mode, "HTML")
+
+    def test_process_pending_telegram_messages_sends_due_message(self) -> None:
+        sent: list[dict[str, object]] = []
+        pending_id = self.app.storage.enqueue_pending_telegram_message(
+            user_id=1,
+            chat_id=100,
+            text="补发结果",
+            message_thread_id=9,
+            reply_to_message_id=None,
+            parse_mode="HTML",
+            due_at=datetime.now(tz=UTC).isoformat(timespec="seconds"),
+        )
+
+        def fake_send_message(**kwargs) -> TelegramMessage:
+            sent.append(kwargs)
+            return TelegramMessage(
+                chat_id=int(kwargs["chat_id"]),
+                message_id=801,
+                message_thread_id=int(kwargs["message_thread_id"]),
+            )
+
+        self.app.telegram.send_message = fake_send_message  # type: ignore[method-assign]
+
+        processed = self.app._process_pending_telegram_messages_once()
+
+        self.assertTrue(processed)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(str(sent[0]["text"]), "补发结果")
+        self.assertIsNone(self.app.storage.get_next_pending_telegram_message_due_at())
+        row = self.app.storage._conn.execute(
+            "SELECT 1 FROM pending_telegram_messages WHERE id = ?",
+            (pending_id,),
+        ).fetchone()
+        self.assertIsNone(row)
+
+    def test_process_pending_telegram_messages_reschedules_when_rate_limited(self) -> None:
+        pending_id = self.app.storage.enqueue_pending_telegram_message(
+            user_id=1,
+            chat_id=100,
+            text="补发结果",
+            message_thread_id=9,
+            reply_to_message_id=None,
+            parse_mode=None,
+            due_at=datetime.now(tz=UTC).isoformat(timespec="seconds"),
+        )
+
+        def fake_send_message(**kwargs) -> TelegramMessage:
+            raise TelegramRateLimitError("限流", retry_after_seconds=20)
+
+        self.app.telegram.send_message = fake_send_message  # type: ignore[method-assign]
+
+        processed = self.app._process_pending_telegram_messages_once()
+
+        self.assertTrue(processed)
+        row = self.app.storage._conn.execute(
+            "SELECT due_at FROM pending_telegram_messages WHERE id = ?",
+            (pending_id,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        assert row is not None
+        due_at = datetime.fromisoformat(str(row["due_at"]))
+        if due_at.tzinfo is None:
+            due_at = due_at.replace(tzinfo=UTC)
+        self.assertGreaterEqual(
+            due_at,
+            datetime.now(tz=UTC) + timedelta(seconds=20),
+        )
 
     def test_safe_delete_preview_message_can_schedule_retry_when_rate_limited(self) -> None:
         active_run = ActiveRun(

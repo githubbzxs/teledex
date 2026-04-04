@@ -55,6 +55,20 @@ class UserWipeSummary:
     user_deleted: bool
 
 
+@dataclass(slots=True)
+class PendingTelegramMessage:
+    id: int
+    user_id: int | None
+    chat_id: int
+    message_thread_id: int | None
+    reply_to_message_id: int | None
+    text: str
+    parse_mode: str | None
+    due_at: str
+    created_at: str
+    updated_at: str
+
+
 class Storage:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -133,15 +147,38 @@ class Storage:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (user_id, chat_id, message_thread_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS pending_telegram_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    chat_id INTEGER NOT NULL,
+                    message_thread_id INTEGER NOT NULL DEFAULT 0,
+                    reply_to_message_id INTEGER,
+                    text TEXT NOT NULL,
+                    parse_mode TEXT,
+                    due_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             session_columns = {
                 str(row["name"])
                 for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
             }
+            pending_message_columns = {
+                str(row["name"])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(pending_telegram_messages)"
+                ).fetchall()
+            }
             if "codex_settings" not in session_columns:
                 self._conn.execute(
                     "ALTER TABLE sessions ADD COLUMN codex_settings TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "user_id" not in pending_message_columns:
+                self._conn.execute(
+                    "ALTER TABLE pending_telegram_messages ADD COLUMN user_id INTEGER"
                 )
             existing_rows = self._conn.execute(
                 "SELECT id, bound_path FROM sessions WHERE bound_path IS NOT NULL AND TRIM(bound_path) != ''"
@@ -231,6 +268,103 @@ class Storage:
                     updated_at = excluded.updated_at
                 """,
                 (str(next_offset), now),
+            )
+            self._conn.commit()
+
+    def enqueue_pending_telegram_message(
+        self,
+        *,
+        user_id: int | None,
+        chat_id: int,
+        text: str,
+        message_thread_id: int | None,
+        reply_to_message_id: int | None,
+        parse_mode: str | None,
+        due_at: str,
+    ) -> int:
+        now = _utc_now()
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO pending_telegram_messages (
+                    user_id,
+                    chat_id,
+                    message_thread_id,
+                    reply_to_message_id,
+                    text,
+                    parse_mode,
+                    due_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    chat_id,
+                    self._normalize_message_thread_id(message_thread_id),
+                    reply_to_message_id,
+                    text,
+                    parse_mode,
+                    due_at,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def list_due_pending_telegram_messages(
+        self,
+        *,
+        due_before: str,
+        limit: int = 20,
+    ) -> list[PendingTelegramMessage]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, user_id, chat_id, message_thread_id, reply_to_message_id,
+                       text, parse_mode, due_at, created_at, updated_at
+                FROM pending_telegram_messages
+                WHERE due_at <= ?
+                ORDER BY due_at ASC, id ASC
+                LIMIT ?
+                """,
+                (due_before, limit),
+            ).fetchall()
+        return [self._row_to_pending_telegram_message(row) for row in rows]
+
+    def get_next_pending_telegram_message_due_at(self) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT due_at
+                FROM pending_telegram_messages
+                ORDER BY due_at ASC, id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None or row["due_at"] is None:
+            return None
+        return str(row["due_at"])
+
+    def reschedule_pending_telegram_message(self, pending_message_id: int, due_at: str) -> None:
+        now = _utc_now()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE pending_telegram_messages
+                SET due_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (due_at, now, pending_message_id),
+            )
+            self._conn.commit()
+
+    def delete_pending_telegram_message(self, pending_message_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM pending_telegram_messages WHERE id = ?",
+                (pending_message_id,),
             )
             self._conn.commit()
 
@@ -666,6 +800,7 @@ class Storage:
                 ).fetchone()
                 is not None
             )
+            self._conn.execute("DELETE FROM pending_telegram_messages WHERE user_id = ?", (user_id,))
             self._conn.execute("DELETE FROM processed_messages WHERE user_id = ?", (user_id,))
             self._conn.execute("DELETE FROM runs WHERE user_id = ?", (user_id,))
             self._conn.execute("DELETE FROM session_contexts WHERE user_id = ?", (user_id,))
@@ -718,6 +853,29 @@ class Storage:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             last_active_at=str(row["last_active_at"]),
+        )
+
+    def _row_to_pending_telegram_message(
+        self, row: sqlite3.Row | None
+    ) -> PendingTelegramMessage:
+        assert row is not None
+        return PendingTelegramMessage(
+            id=int(row["id"]),
+            user_id=int(row["user_id"]) if row["user_id"] is not None else None,
+            chat_id=int(row["chat_id"]),
+            message_thread_id=(
+                int(row["message_thread_id"]) if int(row["message_thread_id"]) != 0 else None
+            ),
+            reply_to_message_id=(
+                int(row["reply_to_message_id"])
+                if row["reply_to_message_id"] is not None
+                else None
+            ),
+            text=str(row["text"]),
+            parse_mode=str(row["parse_mode"]) if row["parse_mode"] else None,
+            due_at=str(row["due_at"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
         )
 
     def _decode_codex_settings(self, raw: str) -> dict[str, Any]:
