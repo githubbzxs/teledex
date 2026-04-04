@@ -434,9 +434,11 @@ def _truncate_preview_tail(text: str, max_chars: int) -> str:
 
 def _format_elapsed_compact(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
+    if total_seconds < 60:
+        return f"{total_seconds}s"
     if total_seconds < 3600:
-        minutes = total_seconds // 60
-        return f"{minutes}m"
+        minutes, remainder = divmod(total_seconds, 60)
+        return f"{minutes}m {remainder:02d}s"
     hours, remainder = divmod(total_seconds, 3600)
     minutes = remainder // 60
     return f"{hours}h {minutes:02d}m"
@@ -2331,7 +2333,7 @@ class TeledexApp:
     ) -> bool:
         if not respect_local_interval:
             return True
-        min_interval = max(0.0, self.config.preview_update_interval_seconds)
+        min_interval = max(0.0, self.config.preview_edit_min_interval_seconds)
         if min_interval <= 0:
             return True
         now = time.monotonic()
