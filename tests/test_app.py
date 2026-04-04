@@ -308,55 +308,6 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertIn("最终回复", sent[0])
 
-    def test_send_run_result_sends_generated_photos_before_final_text(self) -> None:
-        photo_path = Path(self.temp_dir.name) / "generated.png"
-        photo_path.write_bytes(b"png",)
-        active_run = ActiveRun(
-            run_id=1,
-            session_id=1,
-            user_id=1,
-            chat_id=100,
-            message_thread_id=9,
-            prompt="任务",
-            preview_message_id=456,
-            generated_image_paths=[str(photo_path)],
-        )
-        deleted: list[int] = []
-        sent_photos: list[str] = []
-        sent_messages: list[str] = []
-
-        self.app.telegram.delete_message = lambda **kwargs: deleted.append(int(kwargs["message_id"]))  # type: ignore[method-assign]
-
-        def fake_send_photo(
-            chat_id: int,
-            photo_path: Path,
-            message_thread_id: int | None,
-            defer_on_rate_limit: bool = False,
-        ) -> TelegramMessage:
-            sent_photos.append(str(photo_path))
-            return TelegramMessage(chat_id=chat_id, message_id=790, message_thread_id=message_thread_id)
-
-        def fake_send_message(
-            chat_id: int,
-            text: str,
-            message_thread_id: int | None,
-            reply_to_message_id: int | None = None,
-            parse_mode: str | None = None,
-            defer_on_rate_limit: bool = False,
-        ) -> TelegramMessage:
-            sent_messages.append(str(text))
-            return TelegramMessage(chat_id=chat_id, message_id=791, message_thread_id=message_thread_id)
-
-        self.app._safe_send_photo = fake_send_photo  # type: ignore[method-assign]
-        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
-
-        self.app._send_run_result(active_run, "最终回复")
-
-        self.assertEqual(deleted, [456])
-        self.assertEqual(sent_photos, [str(photo_path)])
-        self.assertEqual(len(sent_messages), 1)
-        self.assertIn("最终回复", sent_messages[0])
-
     def test_edit_preview_message_pauses_when_telegram_is_rate_limited(self) -> None:
         active_run = ActiveRun(
             run_id=1,
@@ -678,7 +629,7 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["No directory is bound yet. Use /tbind <absolute-path> first."])
+        self.assertEqual(calls, ["当前还没有绑定目录，请先用 /tbind <绝对路径>。"])
         self.assertNotIn(session.id, self.app._active_runs)
 
     def test_legacy_session_commands_are_redirected_to_tbind(self) -> None:
@@ -713,9 +664,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(
             calls[0],
-            "That management command has been removed. Use /tbind <absolute-path> instead. "
-            "If the directory has no session yet, teledex will create one automatically; "
-            "otherwise it will switch to the existing bound session.",
+            "这个管理命令已经移除，请直接用 /tbind <绝对路径> 进入目录；如果该目录还没有会话会自动创建，已有则自动切换。",
         )
 
     def test_tbind_updates_session_name_to_bound_path(self) -> None:
@@ -757,7 +706,7 @@ class AppMessagingTestCase(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.title, Path(self.temp_dir.name).name)
         self.assertEqual(len(calls), 1)
-        self.assertIn(f"Title: {Path(self.temp_dir.name).name}", calls[0])
+        self.assertIn(f"当前名称：{Path(self.temp_dir.name).name}", calls[0])
 
     def test_tbind_creates_new_session_when_binding_different_directory(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -805,7 +754,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIsNotNone(active)
         assert active is not None
         self.assertEqual(active.id, sessions[1].id)
-        self.assertIn(f"Created session #{sessions[1].id}", calls[0])
+        self.assertIn(f"已自动创建会话 #{sessions[1].id}", calls[0])
 
     def test_sync_bot_commands_registers_management_commands(self) -> None:
         commands: list[tuple[tuple[str, str], ...]] = []
@@ -821,11 +770,11 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(
             commands[0],
             (
-                ("start", "Show help"),
-                ("tbind", "Bind directory"),
-                ("tpwd", "Current directory"),
-                ("tstop", "Stop task"),
-                ("twipe", "Clear state"),
+                ("start", "查看帮助"),
+                ("tbind", "绑定目录"),
+                ("tpwd", "当前目录"),
+                ("tstop", "停止任务"),
+                ("twipe", "清空状态"),
             ),
         )
 
@@ -858,47 +807,6 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(prompts, ["/status"])
         self.assertEqual(commands, [])
-
-    def test_handle_update_routes_photo_message_with_caption_as_prompt_items(self) -> None:
-        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
-        captured: list[IncomingMessage] = []
-
-        def fake_handle_prompt(incoming: IncomingMessage) -> None:
-            captured.append(incoming)
-
-        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
-        self.app.telegram.get_file = lambda file_id: {"file_path": "photos/test-image.jpg"}  # type: ignore[method-assign]
-        self.app.telegram.download_file = lambda file_path, destination: destination  # type: ignore[method-assign]
-
-        self.app._handle_update(
-            {
-                "update_id": 31,
-                "message": {
-                    "message_id": 902,
-                    "caption": "Inspect this UI",
-                    "photo": [
-                        {"file_id": "small", "width": 90, "height": 90},
-                        {"file_id": "large", "width": 1280, "height": 720, "file_size": 8000},
-                    ],
-                    "from": {"id": 1},
-                    "chat": {"id": 100},
-                    "message_thread_id": 9,
-                },
-            }
-        )
-
-        self.assertEqual(len(captured), 1)
-        self.assertEqual(captured[0].text, "Inspect this UI")
-        self.assertEqual(
-            captured[0].input_items,
-            [
-                {"type": "text", "text": "Inspect this UI", "text_elements": []},
-                {
-                    "type": "localImage",
-                    "path": str(self.config.state_dir / "runtime" / "telegram" / "message-902-large.jpg"),
-                },
-            ],
-        )
 
     def test_handle_prompt_uses_thread_scoped_active_session(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -1176,10 +1084,7 @@ class AppMessagingTestCase(unittest.TestCase):
         assert updated is not None
         self.assertIsNone(updated.codex_thread_id)
         self.assertEqual(updated.bound_path, self.temp_dir.name)
-        self.assertEqual(
-            messages,
-            [f"Started a new Codex conversation in session #{session.id}.\nDirectory unchanged: {self.temp_dir.name}"],
-        )
+        self.assertEqual(messages, [f"已在会话 #{session.id} 中开启新的 Codex 对话。\n目录保持不变：{self.temp_dir.name}"])
 
     def test_handle_codex_new_command_rejects_running_session(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
@@ -1228,10 +1133,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(updated.codex_thread_id, "thread-123")
         self.assertEqual(
             messages,
-            [
-                f"Session #{session.id} is running right now, so /new is temporarily unavailable. "
-                "Wait a moment or use /tstop first."
-            ],
+            [f"会话 #{session.id} 正在执行中，/new 暂时不可用，请稍后或先 /tstop。"],
         )
 
     def test_handle_twipe_command_clears_current_user_state(self) -> None:
@@ -1283,13 +1185,13 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(
             messages,
             [
-                "Cleared teledex state for the current user.\n"
-                "Deleted sessions: 1\n"
-                "Deleted runs: 1\n"
-                "Deleted context bindings: 1\n"
-                "Reset persistent terminals: 1\n"
-                "Deleted runtime artifacts: 1\n"
-                "The next message will start again like a fresh session."
+                "已清空当前用户的 teledex 状态。\n"
+                "删除会话：1\n"
+                "删除运行记录：1\n"
+                "删除上下文映射：1\n"
+                "重置持久终端：1\n"
+                "清理运行时文件：1\n"
+                "下一条消息会像全新使用一样重新开始。"
             ],
         )
 
@@ -1376,7 +1278,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0m)\n\nWorking through implementation details",
+            "○ Thinking (0m)\n\n正在处理实现细节",
         )
 
     def test_preview_hides_fenced_code_blocks_in_stream_text(self) -> None:
