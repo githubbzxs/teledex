@@ -97,7 +97,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertEqual(str(calls[0]["text"]), "○ Thinking (0s)")
+        self.assertEqual(str(calls[0]["text"]), "○ Thinking (0m)")
 
     def test_send_run_result_deletes_preview_and_sends_new_final_message(self) -> None:
         active_run = ActiveRun(
@@ -427,49 +427,6 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertTrue(updated)
         self.assertEqual(calls, ["预览内容"])
 
-    def test_edit_preview_message_uses_dedicated_edit_min_interval_setting(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app = TeledexApp(
-                AppConfig(
-                    telegram_bot_token="test-token",
-                    authorized_user_ids={1},
-                    state_dir=Path(temp_dir),
-                    poll_timeout_seconds=30,
-                    preview_update_interval_seconds=60.0,
-                    preview_edit_min_interval_seconds=5.0,
-                    codex_bin="codex",
-                    codex_exec_mode="default",
-                    codex_model=None,
-                    codex_enable_search=False,
-                    codex_persist_extended_history=True,
-                    tmux_bin="tmux",
-                    tmux_shell="/bin/bash",
-                    log_level="INFO",
-                )
-            )
-        active_run = ActiveRun(
-            run_id=1,
-            session_id=1,
-            user_id=1,
-            chat_id=100,
-            message_thread_id=9,
-            prompt="任务",
-            preview_message_id=456,
-            preview_last_edit_at=10.0,
-        )
-        calls: list[str] = []
-
-        def fake_edit_message_text(**kwargs) -> None:
-            calls.append(str(kwargs["text"]))
-
-        app.telegram.edit_message_text = fake_edit_message_text  # type: ignore[method-assign]
-
-        with patch("teledex.app.time.monotonic", return_value=15.1):
-            updated = app._edit_preview_message(active_run, "预览内容")
-
-        self.assertTrue(updated)
-        self.assertEqual(calls, ["预览内容"])
-
     def test_send_run_result_bypasses_local_preview_interval_for_final_render(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             app = TeledexApp(
@@ -629,7 +586,7 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["○ Thinking (0s)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
@@ -679,7 +636,7 @@ class AppMessagingTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(calls, ["○ Thinking (0s)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session.id, self.app._active_runs)
         self.assertTrue(self.app._active_runs[session.id].stop_requested)
         self.assertTrue(self.app._active_runs[session.id].superseded_by_follow_up)
@@ -989,7 +946,7 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["○ Thinking (0s)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
@@ -1338,11 +1295,10 @@ class AppMessagingTestCase(unittest.TestCase):
 
 
 class LivePreviewStateTestCase(unittest.TestCase):
-    def test_format_elapsed_compact_uses_second_level_granularity_before_one_hour(self) -> None:
-        self.assertEqual(_format_elapsed_compact(0), "0s")
-        self.assertEqual(_format_elapsed_compact(59), "59s")
-        self.assertEqual(_format_elapsed_compact(60), "1m 00s")
-        self.assertEqual(_format_elapsed_compact(125), "2m 05s")
+    def test_format_elapsed_compact_uses_minute_granularity(self) -> None:
+        self.assertEqual(_format_elapsed_compact(0), "0m")
+        self.assertEqual(_format_elapsed_compact(59), "0m")
+        self.assertEqual(_format_elapsed_compact(60), "1m")
         self.assertEqual(_format_elapsed_compact(3660), "1h 01m")
 
     def test_preview_deadline_catches_up_without_accumulating_drift(self) -> None:
@@ -1354,19 +1310,19 @@ class LivePreviewStateTestCase(unittest.TestCase):
     def test_status_line_tracks_elapsed_with_circle_animation(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.render(), "○ Thinking (0s)")
-        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=0), "● Thinking (0s)")
-        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=60), "○ Thinking (1m 00s)")
+        self.assertEqual(preview.render(), "○ Thinking (0m)")
+        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=0), "● Thinking (0m)")
+        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=60), "○ Thinking (1m)")
 
     def test_status_line_can_catch_up_multiple_elapsed_seconds(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=180), "● Thinking (3m 00s)")
+        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=180), "● Thinking (3m)")
 
     def test_status_line_accumulates_elapsed_even_when_animation_is_paused(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.advance(animate_steps=0, elapsed_seconds=60), "○ Thinking (1m 00s)")
+        self.assertEqual(preview.advance(animate_steps=0, elapsed_seconds=60), "○ Thinking (1m)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState()
@@ -1374,7 +1330,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\nabcdef",
+            "○ Thinking (0m)\n\nabcdef",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:
@@ -1386,7 +1342,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\n先看目录\n\n再检查配置",
+            "○ Thinking (0m)\n\n先看目录\n\n再检查配置",
         )
 
     def test_command_output_is_hidden_from_preview(self) -> None:
@@ -1397,7 +1353,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
             output_text="first line\nsecond line",
         )
 
-        self.assertEqual(preview.render(), "○ Thinking (0s)")
+        self.assertEqual(preview.render(), "○ Thinking (0m)")
 
     def test_preview_hides_fenced_code_blocks_in_commentary(self) -> None:
         preview = LivePreviewState()
@@ -1408,7 +1364,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\n先检查逻辑\n\n再继续",
+            "○ Thinking (0m)\n\n先检查逻辑\n\n再继续",
         )
 
     def test_preview_replaces_code_only_commentary_with_generic_status(self) -> None:
@@ -1420,7 +1376,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\nWorking through implementation details",
+            "○ Thinking (0m)\n\nWorking through implementation details",
         )
 
     def test_preview_hides_fenced_code_blocks_in_stream_text(self) -> None:
@@ -1429,7 +1385,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\n先说明\n\n后说明",
+            "○ Thinking (0m)\n\n先说明\n\n后说明",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -1438,7 +1394,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.complete(),
-            "● Completed (0s)\n\n完成内容",
+            "● Completed (0m)\n\n完成内容",
         )
 
     def test_commentary_can_be_kept_until_final_answer_starts(self) -> None:
@@ -1447,7 +1403,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\n**Thinking**\n\nChecking files",
+            "○ Thinking (0m)\n\n**Thinking**\n\nChecking files",
         )
 
     def test_footer_statusline_renders_at_bottom(self) -> None:
@@ -1456,7 +1412,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\ngpt-5.4 default · 100% left · ~/teledex",
+            "○ Thinking (0m)\n\ngpt-5.4 default · 100% left · ~/teledex",
         )
 
     def test_final_stream_clears_transient_sections(self) -> None:
@@ -1467,7 +1423,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\n最终输出",
+            "○ Thinking (0m)\n\n最终输出",
         )
 
     def test_complete_clears_transient_sections_and_keeps_final_output(self) -> None:
@@ -1476,7 +1432,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_tool_state("call_1", command_text="cat README.md", output_text="hello")
         preview.update_stream_text("最终输出")
 
-        self.assertEqual(preview.complete(), "● Completed (0s)\n\n最终输出")
+        self.assertEqual(preview.complete(), "● Completed (0m)\n\n最终输出")
 
     def test_commentary_completed_keeps_process_text_before_final_output(self) -> None:
         preview = LivePreviewState()
@@ -1485,7 +1441,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ Thinking (0s)\n\n先检查 README",
+            "○ Thinking (0m)\n\n先检查 README",
         )
 
     def test_drain_preview_stream_retries_when_preview_edit_fails(self) -> None:
@@ -1596,7 +1552,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         app._safe_send_chat_action = lambda *args, **kwargs: None  # type: ignore[method-assign]
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
-        self.assertEqual(attempts, ["○ Thinking (0s)\n\n实时过程"])
+        self.assertEqual(attempts, ["○ Thinking (0m)\n\n实时过程"])
         self.assertFalse(preview.has_pending_stream())
 
     def test_preview_loop_does_not_advance_animation_while_flushing_stream(self) -> None:
@@ -1663,7 +1619,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         app._safe_send_chat_action = lambda *args, **kwargs: None  # type: ignore[method-assign]
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
-        self.assertEqual(attempts, ["● Thinking (0s)\n\n继续思考"])
+        self.assertEqual(attempts, ["● Thinking (0m)\n\n继续思考"])
 
     def test_final_html_only_renders_final_answer_markdown(self) -> None:
         preview = LivePreviewState()
@@ -1672,7 +1628,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         rendered = preview.render_final_html()
 
-        self.assertIn("● Completed (0s)", rendered)
+        self.assertIn("● Completed (0m)", rendered)
         self.assertIn("<b>标题</b>", rendered)
         self.assertIn("• 列表项", rendered)
         self.assertIn("<b>加粗</b>", rendered)
