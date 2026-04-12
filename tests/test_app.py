@@ -54,6 +54,107 @@ class AppMessagingTestCase(unittest.TestCase):
         self.app.storage.close()
         self.temp_dir.cleanup()
 
+    def test_safe_send_message_routes_to_discord_client(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token=None,
+                    authorized_user_ids=set(),
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=1.0,
+                    preview_edit_min_interval_seconds=0.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                    discord_bot_token="discord-token",
+                    authorized_discord_user_ids={7},
+                )
+            )
+        calls: list[dict[str, object]] = []
+
+        class _FakeDiscord:
+            def send_message(self, chat_id: int, text: str, reply_to_message_id: int | None = None):
+                calls.append(
+                    {
+                        "chat_id": chat_id,
+                        "text": text,
+                        "reply_to_message_id": reply_to_message_id,
+                    }
+                )
+                return TelegramMessage(chat_id=chat_id, message_id=888, message_thread_id=None)
+
+        app.discord = _FakeDiscord()  # type: ignore[assignment]
+
+        sent = app._safe_send_message(
+            chat_id=-123456789012345678,
+            text="hello discord",
+            message_thread_id=None,
+            user_id=-7,
+            platform="discord",
+        )
+
+        self.assertIsNotNone(sent)
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "chat_id": 123456789012345678,
+                    "text": "hello discord",
+                    "reply_to_message_id": None,
+                }
+            ],
+        )
+        app.storage.close()
+
+    def test_handle_discord_message_routes_start_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token=None,
+                    authorized_user_ids=set(),
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=1.0,
+                    preview_edit_min_interval_seconds=0.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                    discord_bot_token="discord-token",
+                    authorized_discord_user_ids={7},
+                )
+            )
+        calls: list[dict[str, object]] = []
+
+        def fake_send_message(*args, **kwargs):
+            chat_id = kwargs.get("chat_id", args[0] if args else None)
+            text = kwargs.get("text", args[1] if len(args) > 1 else None)
+            calls.append({"chat_id": chat_id, "text": text})
+            return TelegramMessage(chat_id=int(chat_id), message_id=999, message_thread_id=None)
+
+        app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        app._handle_discord_message(
+            raw_user_id=7,
+            raw_chat_id=123456789012345678,
+            raw_message_id=223456789012345678,
+            text="/start",
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["chat_id"], -123456789012345678)
+        self.assertIn("teledex commands", str(calls[0]["text"]))
+        app.storage.close()
+
     def test_handle_prompt_preview_message_does_not_reply(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "测试会话")

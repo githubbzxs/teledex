@@ -7,7 +7,9 @@ name = "teledex"
 version = "0.1.0"
 description = "Telegram 到远端 Codex 会话的轻量中继器"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "discord.py>=2.4,<3",
+]
 
 [project.scripts]
 teledex = "teledex.__main__:main"

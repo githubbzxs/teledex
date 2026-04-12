@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .codex_runner import CodexProcessHandle, CodexRunner
 from .config import AppConfig
+from .discord_api import DiscordApiError, DiscordClient
 from .formatting import (
     markdown_to_telegram_html,
     split_markdown_message,
@@ -124,12 +125,33 @@ _SANDBOX_MODE_VALUES = ("read-only", "workspace-write", "danger-full-access")
 _PERSONALITY_VALUES = ("none", "friendly", "pragmatic")
 _REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
 _COLLABORATION_MODE_VALUES = ("default", "plan")
+_PLATFORM_TELEGRAM = "telegram"
+_PLATFORM_DISCORD = "discord"
 
 
 def _session_title_from_path(path: Path) -> str:
     normalized = path.expanduser()
     name = normalized.name.strip()
     return name or str(normalized)
+
+
+def _scope_platform_id(platform: str, raw_id: int) -> int:
+    normalized_platform = platform.strip().lower()
+    if normalized_platform == _PLATFORM_DISCORD:
+        return -abs(int(raw_id))
+    return int(raw_id)
+
+
+def _unscoped_platform_id(scoped_id: int) -> int:
+    return abs(int(scoped_id))
+
+
+def _message_platform(platform: str | None, user_id: int | None = None) -> str:
+    if platform:
+        return platform
+    if user_id is not None and int(user_id) < 0:
+        return _PLATFORM_DISCORD
+    return _PLATFORM_TELEGRAM
 
 
 @dataclass(slots=True)
@@ -139,6 +161,7 @@ class IncomingMessage:
     text: str
     message_id: int
     message_thread_id: int | None
+    platform: str = _PLATFORM_TELEGRAM
 
 
 @dataclass(slots=True)
@@ -149,6 +172,7 @@ class ActiveRun:
     chat_id: int
     message_thread_id: int | None
     prompt: str
+    platform: str = _PLATFORM_TELEGRAM
     preview_message_id: int | None = None
     preview_last_edit_at: float = 0.0
     preview_state: LivePreviewState | None = None
@@ -509,9 +533,22 @@ class TeledexApp:
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
         self.storage = Storage(self.config.state_dir / "teledex.sqlite3")
         recovered_runs = self.storage.reconcile_interrupted_runs("服务重启，已回收未完成任务")
-        self.telegram = TelegramClient(self.config.telegram_bot_token)
-        self.runner = CodexRunner(config)
         self.logger = logging.getLogger("teledex")
+        self.telegram = (
+            TelegramClient(self.config.telegram_bot_token)
+            if self.config.telegram_bot_token
+            else None
+        )
+        self.discord = (
+            DiscordClient(
+                self.config.discord_bot_token,
+                on_message=self._handle_discord_message,
+                logger=self.logger,
+            )
+            if self.config.discord_bot_token
+            else None
+        )
+        self.runner = CodexRunner(config)
         self._active_runs: dict[int, ActiveRun] = {}
         self._queued_runs: dict[int, list[ActiveRun]] = {}
         self._session_workers: dict[int, threading.Thread] = {}
@@ -538,11 +575,78 @@ class TeledexApp:
         command_text = text.split()[0]
         return command_text.split("@", 1)[0].lower()
 
+    def _is_authorized_user(self, platform: str, scoped_user_id: int) -> bool:
+        raw_user_id = _unscoped_platform_id(scoped_user_id)
+        if platform == _PLATFORM_DISCORD:
+            return raw_user_id in self.config.authorized_discord_user_ids
+        return raw_user_id in self.config.authorized_telegram_user_ids
+
+    def _reply(
+        self,
+        incoming: IncomingMessage,
+        text: str,
+        reply_to_message_id: int | None = None,
+        parse_mode: str | None = None,
+    ):
+        return self._safe_send_message(
+            chat_id=incoming.chat_id,
+            text=text,
+            message_thread_id=incoming.message_thread_id,
+            reply_to_message_id=reply_to_message_id,
+            parse_mode=parse_mode,
+            user_id=incoming.user_id,
+            platform=incoming.platform,
+        )
+
+    def _reply_long(
+        self,
+        incoming: IncomingMessage,
+        text: str,
+        prefer_html: bool = False,
+    ) -> None:
+        self._send_long_message(
+            chat_id=incoming.chat_id,
+            text=text,
+            message_thread_id=incoming.message_thread_id,
+            prefer_html=prefer_html,
+            user_id=incoming.user_id,
+            platform=incoming.platform,
+        )
+
     def run_forever(self) -> None:
+        workers: list[threading.Thread] = []
+        if self.telegram is not None:
+            self._sync_bot_commands()
+            self._start_pending_message_worker()
+            telegram_worker = threading.Thread(
+                target=self._run_telegram_forever,
+                daemon=True,
+                name="teledex-telegram",
+            )
+            telegram_worker.start()
+            workers.append(telegram_worker)
+        if self.discord is not None:
+            discord_worker = threading.Thread(
+                target=self._run_discord_forever,
+                daemon=True,
+                name="teledex-discord",
+            )
+            discord_worker.start()
+            workers.append(discord_worker)
+        if not workers:
+            raise RuntimeError("未配置任何消息平台")
+
+        while True:
+            for worker in workers:
+                if not worker.is_alive():
+                    raise RuntimeError(f"消息平台线程已退出：{worker.name}")
+            time.sleep(3)
+
+    def _run_telegram_forever(self) -> None:
+        if self.telegram is None:
+            return
         bot = self.telegram.get_me()
         self.logger.info("Telegram bot 已连接: @%s", bot.get("username", "unknown"))
-        self._sync_bot_commands()
-        self._start_pending_message_worker()
         while True:
             try:
                 updates = self.telegram.get_updates(
@@ -551,7 +655,7 @@ class TeledexApp:
                 )
                 for update in updates:
                     next_offset = int(update["update_id"]) + 1
-                    self._handle_update(update)
+                    self._handle_telegram_update(update)
                     self._update_offset = next_offset
                     self.storage.set_telegram_update_offset(next_offset)
             except TelegramRateLimitError as exc:
@@ -562,7 +666,17 @@ class TeledexApp:
                 self.logger.exception("Telegram 轮询失败")
                 time.sleep(3)
             except Exception:
-                self.logger.exception("主循环异常")
+                self.logger.exception("Telegram 主循环异常")
+                time.sleep(3)
+
+    def _run_discord_forever(self) -> None:
+        if self.discord is None:
+            return
+        while True:
+            try:
+                self.discord.run_forever()
+            except Exception:
+                self.logger.exception("Discord 主循环异常")
                 time.sleep(3)
 
     def _remember_telegram_rate_limit(self, retry_after_seconds: int) -> int:
@@ -652,6 +766,8 @@ class TeledexApp:
                 time.sleep(3)
 
     def _process_pending_telegram_messages_once(self) -> bool:
+        if self.telegram is None:
+            return False
         pending_messages = self.storage.list_due_pending_telegram_messages(
             due_before=_utc_now_iso(),
             limit=_PENDING_MESSAGE_BATCH_SIZE,
@@ -666,6 +782,7 @@ class TeledexApp:
 
     def _deliver_pending_telegram_message(self, pending_message: PendingTelegramMessage) -> None:
         try:
+            assert self.telegram is not None
             self.telegram.send_message(
                 chat_id=pending_message.chat_id,
                 text=pending_message.text,
@@ -691,6 +808,9 @@ class TeledexApp:
             self.storage.delete_pending_telegram_message(pending_message.id)
 
     def _handle_update(self, update: dict) -> None:
+        self._handle_telegram_update(update)
+
+    def _handle_telegram_update(self, update: dict) -> None:
         message = update.get("message")
         if not isinstance(message, dict):
             return
@@ -711,12 +831,38 @@ class TeledexApp:
                 if message.get("message_thread_id") is not None
                 else None
             ),
+            platform=_PLATFORM_TELEGRAM,
         )
         update_id = int(update["update_id"]) if update.get("update_id") is not None else None
 
+        self._handle_incoming_message(incoming, update_id=update_id)
+
+    def _handle_discord_message(
+        self,
+        raw_user_id: int,
+        raw_chat_id: int,
+        raw_message_id: int,
+        text: str,
+    ) -> None:
+        incoming = IncomingMessage(
+            chat_id=_scope_platform_id(_PLATFORM_DISCORD, raw_chat_id),
+            user_id=_scope_platform_id(_PLATFORM_DISCORD, raw_user_id),
+            text=text.strip(),
+            message_id=_scope_platform_id(_PLATFORM_DISCORD, raw_message_id),
+            message_thread_id=None,
+            platform=_PLATFORM_DISCORD,
+        )
+        self._handle_incoming_message(incoming, update_id=None)
+
+    def _handle_incoming_message(
+        self,
+        incoming: IncomingMessage,
+        update_id: int | None,
+    ) -> None:
         if self.storage.has_processed_message(incoming.chat_id, incoming.message_id):
             self.logger.info(
-                "忽略重复 Telegram 消息：chat=%s message_id=%s update_id=%s",
+                "忽略重复消息：platform=%s chat=%s message_id=%s update_id=%s",
+                incoming.platform,
                 incoming.chat_id,
                 incoming.message_id,
                 update_id,
@@ -724,12 +870,8 @@ class TeledexApp:
             return
 
         handled = False
-        if user_id not in self.config.authorized_user_ids:
-            self._safe_send_message(
-                incoming.chat_id,
-                "You are not authorized to use this bot.",
-                incoming.message_thread_id,
-            )
+        if not self._is_authorized_user(incoming.platform, incoming.user_id):
+            self._reply(incoming, "You are not authorized to use this bot.")
             handled = True
         else:
             self.storage.ensure_user(
@@ -767,6 +909,7 @@ class TeledexApp:
             text="/" + incoming.text[2:],
             message_id=incoming.message_id,
             message_thread_id=incoming.message_thread_id,
+            platform=incoming.platform,
         )
 
     def _handle_command(self, incoming: IncomingMessage) -> None:
@@ -1132,6 +1275,7 @@ class TeledexApp:
             text=prompt,
             message_id=incoming.message_id,
             message_thread_id=incoming.message_thread_id,
+            platform=incoming.platform,
         )
         self._handle_prompt(forwarded)
 
@@ -1143,6 +1287,7 @@ class TeledexApp:
             text=prompt,
             message_id=incoming.message_id,
             message_thread_id=incoming.message_thread_id,
+            platform=incoming.platform,
         )
         self._handle_prompt(forwarded)
 
@@ -1809,6 +1954,7 @@ class TeledexApp:
             chat_id=incoming.chat_id,
             message_thread_id=incoming.message_thread_id,
             prompt=incoming.text,
+            platform=incoming.platform,
             preview_message_id=preview.message_id if preview else None,
             preview_state=preview_state,
         )
@@ -2210,6 +2356,8 @@ class TeledexApp:
                     active_run.chat_id,
                     "typing",
                     active_run.message_thread_id,
+                    user_id=active_run.user_id,
+                    platform=active_run.platform,
                 )
                 last_typing_at = now
 
@@ -2284,6 +2432,8 @@ class TeledexApp:
         text: str,
         prefer_html: bool = False,
     ) -> bool:
+        if active_run.platform == _PLATFORM_DISCORD:
+            return self._edit_preview_message(active_run, self._truncate_discord_text(text))
         if prefer_html:
             rendered_html = markdown_to_telegram_html(text)
             if rendered_html and self._edit_preview_message(
@@ -2304,7 +2454,10 @@ class TeledexApp:
     ) -> bool:
         if active_run.preview_message_id is None:
             return False
-        if self._telegram_rate_limit_remaining_seconds() > 0:
+        if (
+            active_run.platform == _PLATFORM_TELEGRAM
+            and self._telegram_rate_limit_remaining_seconds() > 0
+        ):
             return False
         if not self._acquire_preview_edit_slot(
             active_run,
@@ -2312,17 +2465,30 @@ class TeledexApp:
         ):
             return False
         try:
-            self.telegram.edit_message_text(
-                chat_id=active_run.chat_id,
-                message_id=active_run.preview_message_id,
-                text=text,
-                message_thread_id=active_run.message_thread_id,
-                parse_mode=parse_mode,
-            )
+            if active_run.platform == _PLATFORM_DISCORD:
+                if self.discord is None:
+                    return False
+                self.discord.edit_message(
+                    chat_id=_unscoped_platform_id(active_run.chat_id),
+                    message_id=_unscoped_platform_id(active_run.preview_message_id),
+                    text=self._truncate_discord_text(text),
+                )
+            else:
+                assert self.telegram is not None
+                self.telegram.edit_message_text(
+                    chat_id=active_run.chat_id,
+                    message_id=active_run.preview_message_id,
+                    text=text,
+                    message_thread_id=active_run.message_thread_id,
+                    parse_mode=parse_mode,
+                )
             return True
         except TelegramRateLimitError as exc:
             delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
             self.logger.warning("Telegram 预览更新触发限流，%s 秒内暂停预览发送。", delay)
+            return False
+        except DiscordApiError:
+            self.logger.exception("更新 Discord 预览消息失败")
             return False
         except TelegramApiError as exc:
             if is_message_not_modified_error(exc):
@@ -2357,14 +2523,24 @@ class TeledexApp:
     ) -> None:
         del preview_state
         self._safe_delete_preview_message(active_run, defer_on_rate_limit=True)
+        if active_run.platform == _PLATFORM_DISCORD:
+            final_text = text.strip() or "Completed, but there was no final reply to display."
+            self._send_long_message(
+                chat_id=active_run.chat_id,
+                text=final_text,
+                message_thread_id=active_run.message_thread_id,
+                user_id=active_run.user_id,
+                platform=active_run.platform,
+            )
+            return
         final_text, parse_mode = self._build_final_result_message(text)
         self._safe_send_message(
-            user_id=active_run.user_id,
-            chat_id=active_run.chat_id,
-            text=final_text,
-            message_thread_id=active_run.message_thread_id,
+            active_run.chat_id,
+            final_text,
+            active_run.message_thread_id,
             parse_mode=parse_mode,
             defer_on_rate_limit=True,
+            user_id=active_run.user_id,
         )
 
     def _build_final_result_message(self, text: str) -> tuple[str, str | None]:
@@ -2413,6 +2589,8 @@ class TeledexApp:
             return True
 
     def _sync_bot_commands(self) -> None:
+        if self.telegram is None:
+            return
         try:
             self.telegram.set_my_commands(_BOT_COMMANDS)
         except TelegramApiError:
@@ -2423,18 +2601,30 @@ class TeledexApp:
         chat_id: int,
         action: str,
         message_thread_id: int | None,
+        user_id: int | None = None,
+        platform: str | None = None,
     ) -> None:
-        if self._telegram_rate_limit_remaining_seconds() > 0:
+        resolved_platform = self._resolve_platform(platform, user_id, chat_id)
+        if resolved_platform == _PLATFORM_TELEGRAM and self._telegram_rate_limit_remaining_seconds() > 0:
             return
         try:
-            self.telegram.send_chat_action(
-                chat_id=chat_id,
-                action=action,
-                message_thread_id=message_thread_id,
-            )
+            if resolved_platform == _PLATFORM_DISCORD:
+                if self.discord is None:
+                    return
+                if action == "typing":
+                    self.discord.send_typing(_unscoped_platform_id(chat_id))
+            else:
+                assert self.telegram is not None
+                self.telegram.send_chat_action(
+                    chat_id=chat_id,
+                    action=action,
+                    message_thread_id=message_thread_id,
+                )
         except TelegramRateLimitError as exc:
             delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
             self.logger.warning("Telegram chat action 触发限流，%s 秒内暂停发送。", delay)
+        except DiscordApiError:
+            self.logger.debug("发送 Discord typing 失败", exc_info=True)
         except TelegramApiError:
             self.logger.debug("发送 Telegram chat action 失败", exc_info=True)
 
@@ -2492,15 +2682,27 @@ class TeledexApp:
         preview_message_id = active_run.preview_message_id
         if preview_message_id is None:
             return True
-        if self._telegram_rate_limit_remaining_seconds() > 0:
+        if (
+            active_run.platform == _PLATFORM_TELEGRAM
+            and self._telegram_rate_limit_remaining_seconds() > 0
+        ):
             if defer_on_rate_limit:
                 self._schedule_delayed_preview_delete(active_run)
             return False
         try:
-            self.telegram.delete_message(
-                chat_id=active_run.chat_id,
-                message_id=preview_message_id,
-            )
+            if active_run.platform == _PLATFORM_DISCORD:
+                if self.discord is None:
+                    return False
+                self.discord.delete_message(
+                    chat_id=_unscoped_platform_id(active_run.chat_id),
+                    message_id=_unscoped_platform_id(preview_message_id),
+                )
+            else:
+                assert self.telegram is not None
+                self.telegram.delete_message(
+                    chat_id=active_run.chat_id,
+                    message_id=preview_message_id,
+                )
             active_run.preview_message_id = None
             return True
         except TelegramRateLimitError as exc:
@@ -2508,6 +2710,9 @@ class TeledexApp:
             self.logger.warning("Telegram 删除预览消息触发限流，%s 秒内暂停发送。", delay)
             if defer_on_rate_limit:
                 self._schedule_delayed_preview_delete(active_run)
+            return False
+        except DiscordApiError:
+            self.logger.exception("删除 Discord 预览消息失败")
             return False
         except TelegramApiError:
             self.logger.exception("删除 Telegram 预览消息失败")
@@ -2522,8 +2727,10 @@ class TeledexApp:
         parse_mode: str | None = None,
         defer_on_rate_limit: bool = False,
         user_id: int | None = None,
-    ) -> TelegramMessage | None:
-        if self._telegram_rate_limit_remaining_seconds() > 0:
+        platform: str | None = None,
+    ):
+        resolved_platform = self._resolve_platform(platform, user_id, chat_id)
+        if resolved_platform == _PLATFORM_TELEGRAM and self._telegram_rate_limit_remaining_seconds() > 0:
             if defer_on_rate_limit:
                 self._schedule_delayed_message_send(
                     user_id,
@@ -2535,6 +2742,19 @@ class TeledexApp:
                 )
             return None
         try:
+            if resolved_platform == _PLATFORM_DISCORD:
+                if self.discord is None:
+                    return None
+                return self.discord.send_message(
+                    chat_id=_unscoped_platform_id(chat_id),
+                    text=self._truncate_discord_text(text),
+                    reply_to_message_id=(
+                        _unscoped_platform_id(reply_to_message_id)
+                        if reply_to_message_id is not None
+                        else None
+                    ),
+                )
+            assert self.telegram is not None
             return self.telegram.send_message(
                 chat_id=chat_id,
                 text=text,
@@ -2555,6 +2775,9 @@ class TeledexApp:
                     parse_mode=parse_mode,
                 )
             return None
+        except DiscordApiError:
+            self.logger.exception("发送 Discord 消息失败")
+            return None
         except TelegramApiError:
             self.logger.exception("发送 Telegram 消息失败")
             return None
@@ -2566,7 +2789,23 @@ class TeledexApp:
         message_thread_id: int | None,
         reply_to_message_id: int | None = None,
         prefer_html: bool = False,
+        user_id: int | None = None,
+        platform: str | None = None,
     ) -> None:
+        resolved_platform = self._resolve_platform(platform, user_id, chat_id)
+        if resolved_platform == _PLATFORM_DISCORD:
+            parts = self._split_message(text, 1900)
+            for index, part in enumerate(parts):
+                current_reply_to = reply_to_message_id if index == 0 else None
+                self._safe_send_message(
+                    chat_id=chat_id,
+                    text=part,
+                    message_thread_id=message_thread_id,
+                    reply_to_message_id=current_reply_to,
+                    user_id=user_id,
+                    platform=resolved_platform,
+                )
+            return
         parts = (
             split_markdown_message(text, 3500)
             if prefer_html
@@ -2577,20 +2816,44 @@ class TeledexApp:
             if prefer_html:
                 html_text = markdown_to_telegram_html(part)
                 sent = self._safe_send_message(
-                    chat_id,
-                    html_text,
-                    message_thread_id,
+                    chat_id=chat_id,
+                    text=html_text,
+                    message_thread_id=message_thread_id,
                     reply_to_message_id=current_reply_to,
                     parse_mode="HTML",
+                    user_id=user_id,
+                    platform=resolved_platform,
                 )
                 if sent is not None:
                     continue
             self._safe_send_message(
-                chat_id,
-                part,
-                message_thread_id,
+                chat_id=chat_id,
+                text=part,
+                message_thread_id=message_thread_id,
                 reply_to_message_id=current_reply_to,
+                user_id=user_id,
+                platform=resolved_platform,
             )
+
+    def _resolve_platform(
+        self,
+        platform: str | None,
+        user_id: int | None,
+        chat_id: int | None,
+    ) -> str:
+        if platform:
+            return _message_platform(platform)
+        if user_id is not None:
+            return _message_platform(None, user_id=user_id)
+        if chat_id is not None and int(chat_id) < 0 and abs(int(chat_id)) >= 10**15:
+            return _PLATFORM_DISCORD
+        return _PLATFORM_TELEGRAM
+
+    def _truncate_discord_text(self, text: str, limit: int = 1900) -> str:
+        normalized = text.strip() or "Working..."
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 3].rstrip() + "..."
 
     def _split_message(self, text: str, max_length: int) -> list[str]:
         if len(text) <= max_length:

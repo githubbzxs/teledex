@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -25,7 +25,7 @@ def _parse_int_set(value: str | None) -> set[int]:
 
 @dataclass(slots=True)
 class AppConfig:
-    telegram_bot_token: str
+    telegram_bot_token: str | None
     authorized_user_ids: set[int]
     state_dir: Path
     poll_timeout_seconds: int
@@ -39,18 +39,34 @@ class AppConfig:
     tmux_bin: str
     tmux_shell: str
     log_level: str
+    discord_bot_token: str | None = None
+    authorized_discord_user_ids: set[int] = field(default_factory=set)
+
+    @property
+    def authorized_telegram_user_ids(self) -> set[int]:
+        return self.authorized_user_ids
 
     @classmethod
     def from_env(cls) -> "AppConfig":
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-        if not token:
-            raise ValueError("缺少环境变量 TELEGRAM_BOT_TOKEN")
-
-        authorized_user_ids = _parse_int_set(
+        telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() or None
+        authorized_telegram_user_ids = _parse_int_set(
             os.environ.get("AUTHORIZED_TELEGRAM_USER_IDS")
         )
-        if not authorized_user_ids:
-            raise ValueError("缺少环境变量 AUTHORIZED_TELEGRAM_USER_IDS")
+        discord_bot_token = os.environ.get("DISCORD_BOT_TOKEN", "").strip() or None
+        authorized_discord_user_ids = _parse_int_set(
+            os.environ.get("AUTHORIZED_DISCORD_USER_IDS")
+        )
+
+        if not telegram_bot_token and not discord_bot_token:
+            raise ValueError("至少配置 TELEGRAM_BOT_TOKEN 或 DISCORD_BOT_TOKEN 其中之一")
+        if telegram_bot_token and not authorized_telegram_user_ids:
+            raise ValueError("配置 TELEGRAM_BOT_TOKEN 时必须同时提供 AUTHORIZED_TELEGRAM_USER_IDS")
+        if authorized_telegram_user_ids and not telegram_bot_token:
+            raise ValueError("提供 AUTHORIZED_TELEGRAM_USER_IDS 前必须先配置 TELEGRAM_BOT_TOKEN")
+        if discord_bot_token and not authorized_discord_user_ids:
+            raise ValueError("配置 DISCORD_BOT_TOKEN 时必须同时提供 AUTHORIZED_DISCORD_USER_IDS")
+        if authorized_discord_user_ids and not discord_bot_token:
+            raise ValueError("提供 AUTHORIZED_DISCORD_USER_IDS 前必须先配置 DISCORD_BOT_TOKEN")
 
         state_dir = Path(os.environ.get("TELEDEX_STATE_DIR", "data")).expanduser()
         poll_timeout_seconds = int(os.environ.get("TELEDEX_POLL_TIMEOUT_SECONDS", "30"))
@@ -85,8 +101,8 @@ class AppConfig:
         log_level = os.environ.get("TELEDEX_LOG_LEVEL", "INFO").strip().upper() or "INFO"
 
         return cls(
-            telegram_bot_token=token,
-            authorized_user_ids=authorized_user_ids,
+            telegram_bot_token=telegram_bot_token,
+            authorized_user_ids=authorized_telegram_user_ids,
             state_dir=state_dir,
             poll_timeout_seconds=poll_timeout_seconds,
             preview_update_interval_seconds=preview_update_interval_seconds,
@@ -99,4 +115,6 @@ class AppConfig:
             tmux_bin=tmux_bin,
             tmux_shell=tmux_shell,
             log_level=log_level,
+            discord_bot_token=discord_bot_token,
+            authorized_discord_user_ids=authorized_discord_user_ids,
         )
