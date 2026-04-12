@@ -383,6 +383,60 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertTrue(updated)
         self.assertEqual(calls, ["预览内容"])
 
+    def test_edit_preview_message_respects_global_min_interval_across_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token="test-token",
+                    authorized_user_ids={1},
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=1.0,
+                    preview_edit_min_interval_seconds=5.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                )
+            )
+        first_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务一",
+            preview_message_id=456,
+        )
+        second_run = ActiveRun(
+            run_id=2,
+            session_id=2,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务二",
+            preview_message_id=789,
+        )
+        calls: list[str] = []
+
+        def fake_edit_message_text(**kwargs) -> None:
+            calls.append(f"{kwargs['message_id']}:{kwargs['text']}")
+
+        app.telegram.edit_message_text = fake_edit_message_text  # type: ignore[method-assign]
+
+        with patch("teledex.app.time.monotonic", return_value=10.0):
+            self.assertTrue(app._edit_preview_message(first_run, "预览一"))
+        with patch("teledex.app.time.monotonic", return_value=12.0):
+            self.assertFalse(app._edit_preview_message(second_run, "预览二"))
+        with patch("teledex.app.time.monotonic", return_value=15.1):
+            self.assertTrue(app._edit_preview_message(second_run, "预览二"))
+
+        self.assertEqual(calls, ["456:预览一", "789:预览二"])
+
     def test_send_run_result_bypasses_local_preview_interval_for_final_render(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             app = TeledexApp(
@@ -1657,6 +1711,73 @@ class LivePreviewStateTestCase(unittest.TestCase):
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
         self.assertEqual(attempts, ["● Thinking (0m)\n\n继续思考"])
+
+    def test_preview_loop_skips_typing_when_preview_message_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token="test-token",
+                    authorized_user_ids={1},
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=60.0,
+                    preview_edit_min_interval_seconds=0.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                )
+            )
+
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        preview = LivePreviewState()
+        preview.update_commentary("msg_1", "实时过程")
+
+        class _StopEvent:
+            def __init__(self) -> None:
+                self._set = False
+
+            def is_set(self) -> bool:
+                return self._set
+
+            def wait(self, timeout: float) -> bool:
+                self._set = True
+                return True
+
+            def set(self) -> None:
+                self._set = True
+
+        stop_event = _StopEvent()
+        chat_actions: list[str] = []
+
+        def fake_update_preview(
+            active_run: ActiveRun,
+            text: str,
+            prefer_html: bool = False,
+        ) -> bool:
+            stop_event.set()
+            return True
+
+        def fake_send_chat_action(*args, **kwargs) -> None:
+            chat_actions.append("typing")
+
+        app._update_preview = fake_update_preview  # type: ignore[method-assign]
+        app._safe_send_chat_action = fake_send_chat_action  # type: ignore[method-assign]
+        app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
+
+        self.assertEqual(chat_actions, [])
 
     def test_final_html_only_renders_final_answer_markdown(self) -> None:
         preview = LivePreviewState()

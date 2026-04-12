@@ -520,6 +520,9 @@ class TeledexApp:
         self._telegram_rate_limit_lock = threading.RLock()
         self._telegram_rate_limit_until = 0.0
         self._preview_edit_lock = threading.RLock()
+        self._preview_last_edit_at = 0.0
+        self._chat_action_lock = threading.RLock()
+        self._chat_action_last_sent_at = 0.0
         self._pending_message_worker_lock = threading.RLock()
         self._pending_message_worker_started = False
         if recovered_runs > 0:
@@ -2198,7 +2201,11 @@ class TeledexApp:
         next_animation_at = now + animation_interval
         while not stop_event.is_set():
             now = time.monotonic()
-            if now - last_typing_at >= _PREVIEW_TYPING_INTERVAL_SECONDS:
+            if (
+                active_run.preview_message_id is None
+                and now - last_typing_at >= _PREVIEW_TYPING_INTERVAL_SECONDS
+                and self._acquire_chat_action_slot(now)
+            ):
                 self._safe_send_chat_action(
                     active_run.chat_id,
                     "typing",
@@ -2378,16 +2385,31 @@ class TeledexApp:
         active_run: ActiveRun,
         respect_local_interval: bool,
     ) -> bool:
-        if not respect_local_interval:
+        now = time.monotonic()
+        min_interval = max(0.0, self.config.preview_edit_min_interval_seconds)
+        if min_interval <= 0:
+            active_run.preview_last_edit_at = now
             return True
-        min_interval = max(0.0, self.config.preview_update_interval_seconds)
+        with self._preview_edit_lock:
+            if now - self._preview_last_edit_at < min_interval:
+                return False
+            if respect_local_interval and now - active_run.preview_last_edit_at < min_interval:
+                return False
+            self._preview_last_edit_at = now
+            active_run.preview_last_edit_at = now
+            return True
+
+    def _acquire_chat_action_slot(self, now: float) -> bool:
+        min_interval = max(
+            float(_PREVIEW_TYPING_INTERVAL_SECONDS),
+            self.config.preview_edit_min_interval_seconds,
+        )
         if min_interval <= 0:
             return True
-        now = time.monotonic()
-        with self._preview_edit_lock:
-            if now - active_run.preview_last_edit_at < min_interval:
+        with self._chat_action_lock:
+            if now - self._chat_action_last_sent_at < min_interval:
                 return False
-            active_run.preview_last_edit_at = now
+            self._chat_action_last_sent_at = now
             return True
 
     def _sync_bot_commands(self) -> None:

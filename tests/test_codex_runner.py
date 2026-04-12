@@ -330,6 +330,26 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertNotIn("env -i", message)
         self.assertNotIn("GH_TOKEN", message)
 
+    def test_read_status_file_ignores_transient_empty_or_partial_json(self) -> None:
+        status_file = Path(self.temp_dir.name) / "status.json"
+
+        status_file.write_text("", encoding="utf-8")
+        self.assertIsNone(self.runner.read_status_file(status_file))
+
+        status_file.write_text("{", encoding="utf-8")
+        self.assertIsNone(self.runner.read_status_file(status_file))
+
+        status_file.write_text(
+            json.dumps({"exit_code": 0, "error_message": None}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        status = self.runner.read_status_file(status_file)
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status.exit_code, 0)
+        self.assertIsNone(status.error_message)
+
 
 if __name__ == "__main__":
     unittest.main()

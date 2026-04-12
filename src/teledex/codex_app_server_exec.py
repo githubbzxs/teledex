@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 from collections import deque
 from pathlib import Path
@@ -211,10 +213,19 @@ def _write_status(
         "exit_code": exit_code,
         "error_message": error_message,
     }
-    status_file.write_text(
-        json.dumps(payload, ensure_ascii=False),
-        encoding="utf-8",
+    temp_fd, temp_path = tempfile.mkstemp(
+        prefix=f".{status_file.name}.",
+        suffix=".tmp",
+        dir=str(status_file.parent),
     )
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(json.dumps(payload, ensure_ascii=False))
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        Path(temp_path).replace(status_file)
+    finally:
+        Path(temp_path).unlink(missing_ok=True)
 
 
 def _normalize_item(item: Any) -> Any:

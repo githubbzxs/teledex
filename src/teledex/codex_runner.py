@@ -350,7 +350,13 @@ class CodexRunner:
     def read_status_file(self, status_file: Path) -> CodexProcessStatus | None:
         if not status_file.exists():
             return None
-        payload = json.loads(status_file.read_text(encoding="utf-8"))
+        raw = status_file.read_text(encoding="utf-8", errors="replace").strip()
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
         exit_code = int(payload.get("exit_code", 1))
         error_message = str(payload.get("error_message") or "").strip() or None
         return CodexProcessStatus(exit_code=exit_code, error_message=error_message)
