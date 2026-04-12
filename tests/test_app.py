@@ -1375,6 +1375,25 @@ class LivePreviewStateTestCase(unittest.TestCase):
             "○ Thinking (0m)\n\n**Thinking**\n\nChecking files",
         )
 
+    def test_collaboration_active_hides_commentary_and_tool_state(self) -> None:
+        preview = LivePreviewState()
+        preview.update_commentary("msg_1", "先看目录")
+        preview.update_tool_state("call_1", command_text="pwd", output_text="/root/teledex")
+        preview.set_collaboration_active(True)
+
+        self.assertEqual(preview.render(), "○ Thinking (0m)")
+
+    def test_collaboration_active_keeps_final_stream_visible(self) -> None:
+        preview = LivePreviewState()
+        preview.set_collaboration_active(True)
+        preview.update_commentary("msg_1", "这段不该显示")
+        preview.update_stream_text("主线程最终输出")
+
+        self.assertEqual(
+            preview.render(),
+            "○ Thinking (0m)\n\n主线程最终输出",
+        )
+
     def test_footer_statusline_renders_at_bottom(self) -> None:
         preview = LivePreviewState()
         preview.update_footer_statusline("gpt-5.4 default · 100% left · ~/teledex")
@@ -1412,6 +1431,55 @@ class LivePreviewStateTestCase(unittest.TestCase):
             preview.render(),
             "○ Thinking (0m)\n\n先检查 README",
         )
+
+    def test_collaboration_delta_from_session_log_line_uses_parent_thread_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = TeledexApp(
+                AppConfig(
+                    telegram_bot_token="test-token",
+                    authorized_user_ids={1},
+                    state_dir=Path(temp_dir),
+                    poll_timeout_seconds=30,
+                    preview_update_interval_seconds=1.0,
+                    preview_edit_min_interval_seconds=0.0,
+                    codex_bin="codex",
+                    codex_exec_mode="default",
+                    codex_model=None,
+                    codex_enable_search=False,
+                    codex_persist_extended_history=True,
+                    tmux_bin="tmux",
+                    tmux_shell="/bin/bash",
+                    log_level="INFO",
+                )
+            )
+
+            spawn_line = (
+                '{"type":"event_msg","payload":{"type":"collab_agent_spawn_end",'
+                '"sender_thread_id":"thread-parent"}}'
+            )
+            close_line = (
+                '{"type":"event_msg","payload":{"type":"collab_close_end",'
+                '"sender_thread_id":"thread-parent"}}'
+            )
+            other_line = (
+                '{"type":"event_msg","payload":{"type":"collab_agent_spawn_end",'
+                '"sender_thread_id":"thread-other"}}'
+            )
+
+            self.assertEqual(
+                app._collaboration_delta_from_session_log_line(spawn_line, "thread-parent"),
+                1,
+            )
+            self.assertEqual(
+                app._collaboration_delta_from_session_log_line(close_line, "thread-parent"),
+                -1,
+            )
+            self.assertEqual(
+                app._collaboration_delta_from_session_log_line(other_line, "thread-parent"),
+                0,
+            )
+
+            app.storage.close()
 
     def test_drain_preview_stream_retries_when_preview_edit_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

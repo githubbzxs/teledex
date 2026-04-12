@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
 import shutil
@@ -45,6 +46,7 @@ _PREVIEW_OUTPUT_MAX_CHARS = 2200
 _PREVIEW_MESSAGE_MAX_CHARS = 3800
 _PREVIEW_LOOP_IDLE_SECONDS = 0.1
 _PREVIEW_DRAIN_TIMEOUT_SECONDS = 8.0
+_COLLABORATION_WATCH_POLL_INTERVAL_SECONDS = 0.2
 _PENDING_MESSAGE_IDLE_SLEEP_SECONDS = 2.0
 _PENDING_MESSAGE_MAX_SLEEP_SECONDS = 30.0
 _PENDING_MESSAGE_BATCH_SIZE = 20
@@ -178,6 +180,7 @@ class LivePreviewState:
         self._in_progress = True
         self._flush_requested = False
         self._elapsed_seconds = 0
+        self._collaboration_active = False
         self._lock = threading.RLock()
 
     def update_status(self, text: str) -> None:
@@ -213,6 +216,8 @@ class LivePreviewState:
         if not normalized or not normalized_id:
             return
         with self._lock:
+            if self._collaboration_active:
+                return
             previous = self._commentary_text_by_id.get(normalized_id)
             if normalized_id not in self._commentary_text_by_id:
                 self._commentary_order.append(normalized_id)
@@ -251,6 +256,8 @@ class LivePreviewState:
         if not normalized_id or (not normalized_command and not normalized_output):
             return
         with self._lock:
+            if self._collaboration_active:
+                return
             if normalized_id not in self._tool_order:
                 self._tool_order.append(normalized_id)
             changed = False
@@ -304,6 +311,20 @@ class LivePreviewState:
     def target_text(self) -> str:
         with self._lock:
             return self._target_text
+
+    def set_collaboration_active(self, active: bool) -> None:
+        with self._lock:
+            normalized = bool(active)
+            if normalized == self._collaboration_active:
+                return
+            self._collaboration_active = normalized
+            if normalized:
+                self._commentary_order.clear()
+                self._commentary_text_by_id.clear()
+                self._tool_order.clear()
+                self._tool_command_by_id.clear()
+                self._tool_output_by_id.clear()
+            self._flush_requested = True
 
     def finish(self, status_text: str) -> str:
         with self._lock:
@@ -369,6 +390,8 @@ class LivePreviewState:
             if output_text:
                 sections.append(output_text)
         else:
+            if self._collaboration_active:
+                return ""
             commentary = self._render_commentary_locked()
             if commentary:
                 sections.append(commentary)
@@ -1870,6 +1893,99 @@ class TeledexApp:
             return bool(is_alive())
         return False
 
+    def _locate_codex_session_log(self, thread_id: str) -> Path | None:
+        normalized_thread_id = thread_id.strip()
+        if not normalized_thread_id:
+            return None
+        sessions_root = Path.home() / ".codex" / "sessions"
+        if not sessions_root.exists():
+            return None
+        matches = sorted(
+            sessions_root.rglob(f"*{normalized_thread_id}.jsonl"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        return matches[0] if matches else None
+
+    def _collaboration_delta_from_session_log_line(
+        self,
+        line: str,
+        parent_thread_id: str,
+    ) -> int:
+        raw = line.strip()
+        if not raw:
+            return 0
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return 0
+        if str(payload.get("type") or "").strip() != "event_msg":
+            return 0
+        event_payload = payload.get("payload")
+        if not isinstance(event_payload, dict):
+            return 0
+        if str(event_payload.get("sender_thread_id") or "").strip() != parent_thread_id:
+            return 0
+        event_type = str(event_payload.get("type") or "").strip()
+        if event_type == "collab_agent_spawn_end":
+            return 1
+        if event_type == "collab_close_end":
+            return -1
+        return 0
+
+    def _watch_collaboration_events(
+        self,
+        thread_id: str,
+        preview_state: LivePreviewState,
+        stop_event: threading.Event,
+    ) -> None:
+        normalized_thread_id = thread_id.strip()
+        active_collaboration_count = 0
+        session_log_path: Path | None = None
+        session_log_offset = 0
+        try:
+            while not stop_event.is_set():
+                if session_log_path is None:
+                    session_log_path = self._locate_codex_session_log(normalized_thread_id)
+                    if session_log_path is None:
+                        stop_event.wait(_COLLABORATION_WATCH_POLL_INTERVAL_SECONDS)
+                        continue
+                    session_log_offset = session_log_path.stat().st_size
+
+                try:
+                    with session_log_path.open(
+                        "r",
+                        encoding="utf-8",
+                        errors="replace",
+                    ) as session_log_file:
+                        session_log_file.seek(session_log_offset)
+                        while True:
+                            line = session_log_file.readline()
+                            if not line:
+                                break
+                            session_log_offset = session_log_file.tell()
+                            delta = self._collaboration_delta_from_session_log_line(
+                                line,
+                                normalized_thread_id,
+                            )
+                            if delta == 0:
+                                continue
+                            active_collaboration_count = max(
+                                0,
+                                active_collaboration_count + delta,
+                            )
+                            preview_state.set_collaboration_active(
+                                active_collaboration_count > 0
+                            )
+                except FileNotFoundError:
+                    session_log_path = None
+                    session_log_offset = 0
+                    preview_state.set_collaboration_active(False)
+
+                stop_event.wait(_COLLABORATION_WATCH_POLL_INTERVAL_SECONDS)
+        finally:
+            preview_state.set_collaboration_active(False)
+
     def _execute_run(
         self,
         session: SessionRecord,
@@ -1884,6 +2000,25 @@ class TeledexApp:
             daemon=True,
         )
         preview_worker.start()
+        collaboration_stop_event = threading.Event()
+        collaboration_worker: threading.Thread | None = None
+
+        def _ensure_collaboration_watch(thread_id: str | None) -> None:
+            nonlocal collaboration_worker
+            normalized_thread_id = str(thread_id or "").strip()
+            if not normalized_thread_id or self._thread_is_alive(collaboration_worker):
+                return
+            collaboration_worker = threading.Thread(
+                target=self._watch_collaboration_events,
+                args=(
+                    normalized_thread_id,
+                    preview_state,
+                    collaboration_stop_event,
+                ),
+                daemon=True,
+            )
+            collaboration_worker.start()
+
         try:
             if session.bound_path is None:
                 raise RuntimeError("The session is not bound to a directory.")
@@ -1896,6 +2031,7 @@ class TeledexApp:
                 session_id=session.id,
                 settings=session.codex_settings,
             )
+            _ensure_collaboration_watch(session.codex_thread_id)
             with self._active_runs_lock:
                 current = self._active_runs.get(session.id)
                 if current is not None:
@@ -1908,6 +2044,7 @@ class TeledexApp:
                 parsed = self.runner.parse_event_line(line)
                 if parsed.thread_id:
                     self.storage.update_session_thread_id(session.id, parsed.thread_id)
+                    _ensure_collaboration_watch(parsed.thread_id)
                 if parsed.final_message:
                     final_message = parsed.final_message
                 if parsed.commentary_id and parsed.commentary_text:
@@ -1987,6 +2124,9 @@ class TeledexApp:
             )
             self.storage.update_session_status(session.id, "error")
         finally:
+            collaboration_stop_event.set()
+            if self._thread_is_alive(collaboration_worker):
+                collaboration_worker.join(timeout=1.0)
             self._stop_preview_loop(preview_stop_event, preview_worker)
             if active_run.process_handle is not None:
                 try:

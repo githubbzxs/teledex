@@ -69,6 +69,7 @@ class ParsedCodexEvent:
     status_text: str | None = None
     footer_statusline: str | None = None
     preview_text: str | None = None
+    preview_is_final: bool = False
     commentary_id: str | None = None
     commentary_text: str | None = None
     commentary_completed_id: str | None = None
@@ -303,7 +304,8 @@ class CodexRunner:
                 return _with_footer(
                     ParsedCodexEvent(
                         status_text="Thinking" if phase == "final_answer" or text else None,
-                        preview_text=text or None,
+                        preview_text=(text or None) if phase == "final_answer" else None,
+                        preview_is_final=(phase == "final_answer" and bool(text)),
                         final_message=(text or None) if event_type == "item.completed" else None,
                     )
                 )
