@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
 from .codex_runner import CodexProcessHandle, CodexRunner
 from .config import AppConfig
@@ -127,6 +128,7 @@ _REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
 _COLLABORATION_MODE_VALUES = ("default", "plan")
 _PLATFORM_TELEGRAM = "telegram"
 _PLATFORM_DISCORD = "discord"
+_LOCAL_LINK_LINE_SUFFIX_PATTERN = re.compile(r"^(?P<path>/.+?):(?P<line>\d+)(?::(?P<column>\d+))?$")
 
 
 def _session_title_from_path(path: Path) -> str:
@@ -179,6 +181,12 @@ class ActiveRun:
     process_handle: CodexProcessHandle | None = None
     stop_requested: bool = False
     superseded_by_follow_up: bool = False
+
+
+@dataclass(slots=True)
+class RepoWebContext:
+    repo_root: Path
+    file_url_prefix: str
 
 
 class LivePreviewState:
@@ -562,6 +570,7 @@ class TeledexApp:
         self._chat_action_last_sent_at = 0.0
         self._pending_message_worker_lock = threading.RLock()
         self._pending_message_worker_started = False
+        self._repo_web_context_cache: dict[str, RepoWebContext | None] = {}
         if recovered_runs > 0:
             self.logger.warning("服务启动时回收了 %s 个遗留运行中的会话。", recovered_runs)
 
@@ -2533,7 +2542,10 @@ class TeledexApp:
                 platform=active_run.platform,
             )
             return
-        final_text, parse_mode = self._build_final_result_message(text)
+        final_text, parse_mode = self._build_final_result_message(
+            text,
+            session_id=active_run.session_id,
+        )
         self._safe_send_message(
             active_run.chat_id,
             final_text,
@@ -2543,10 +2555,14 @@ class TeledexApp:
             user_id=active_run.user_id,
         )
 
-    def _build_final_result_message(self, text: str) -> tuple[str, str | None]:
+    def _build_final_result_message(
+        self,
+        text: str,
+        session_id: int | None = None,
+    ) -> tuple[str, str | None]:
         plain_limit = 3500
         cleaned = text.strip()
-        html_text = markdown_to_telegram_html(cleaned)
+        html_text = self._render_telegram_html(cleaned, session_id=session_id)
         if html_text and len(html_text) <= 3500:
             return html_text, "HTML"
         plain_text = cleaned or "Completed, but there was no final reply to display."
@@ -2555,6 +2571,121 @@ class TeledexApp:
         suffix = "\n\n[Truncated for length]"
         truncated = plain_text[: plain_limit - len(suffix) - 3].rstrip() + "..." + suffix
         return truncated, None
+
+    def _render_telegram_html(self, text: str, session_id: int | None = None) -> str:
+        resolver = None
+        if session_id is not None:
+            resolver = lambda target: self._resolve_local_file_link_for_session(session_id, target)
+        return markdown_to_telegram_html(text, local_link_resolver=resolver)
+
+    def _resolve_local_file_link_for_session(self, session_id: int, target: str) -> str | None:
+        session = self.storage.get_session(session_id)
+        if session is None or not session.bound_path:
+            return None
+        return self._resolve_local_file_link(Path(session.bound_path), target)
+
+    def _resolve_local_file_link(self, bound_path: Path, target: str) -> str | None:
+        target_path, fragment = self._split_local_link_target(target)
+        if not target_path.startswith("/"):
+            return None
+        repo_context = self._repo_web_context_for_path(bound_path)
+        if repo_context is None:
+            return None
+        resolved_target_path = Path(target_path).expanduser().resolve(strict=False)
+        try:
+            relative_path = resolved_target_path.relative_to(repo_context.repo_root)
+        except ValueError:
+            return None
+        relative_url = quote(relative_path.as_posix(), safe="/")
+        return f"{repo_context.file_url_prefix}/{relative_url}{fragment}"
+
+    def _split_local_link_target(self, target: str) -> tuple[str, str]:
+        normalized = target.strip()
+        if not normalized:
+            return "", ""
+        if "#" in normalized:
+            file_path, fragment = normalized.split("#", 1)
+            return file_path, f"#{fragment}"
+        match = _LOCAL_LINK_LINE_SUFFIX_PATTERN.match(normalized)
+        if not match:
+            return normalized, ""
+        line = str(match.group("line"))
+        column = match.group("column")
+        fragment = f"#L{line}"
+        if column:
+            fragment += f"C{column}"
+        return str(match.group("path")), fragment
+
+    def _repo_web_context_for_path(self, bound_path: Path) -> RepoWebContext | None:
+        cache_key = str(bound_path.expanduser().resolve(strict=False))
+        if cache_key in self._repo_web_context_cache:
+            return self._repo_web_context_cache[cache_key]
+        repo_context = self._load_repo_web_context(bound_path)
+        self._repo_web_context_cache[cache_key] = repo_context
+        return repo_context
+
+    def _load_repo_web_context(self, bound_path: Path) -> RepoWebContext | None:
+        repo_root_text = self._run_git_capture(bound_path, "rev-parse", "--show-toplevel")
+        if not repo_root_text:
+            return None
+        origin_url = self._run_git_capture(bound_path, "config", "--get", "remote.origin.url")
+        if not origin_url:
+            return None
+        ref = self._run_git_capture(bound_path, "branch", "--show-current")
+        if not ref:
+            ref = self._run_git_capture(bound_path, "rev-parse", "HEAD")
+        if not ref:
+            return None
+        file_url_prefix = self._build_repo_file_url_prefix(origin_url, ref)
+        if not file_url_prefix:
+            return None
+        return RepoWebContext(
+            repo_root=Path(repo_root_text).expanduser().resolve(strict=False),
+            file_url_prefix=file_url_prefix,
+        )
+
+    def _run_git_capture(self, cwd: Path, *args: str) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(cwd), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return None
+        output = completed.stdout.strip()
+        return output or None
+
+    def _build_repo_file_url_prefix(self, origin_url: str, ref: str) -> str | None:
+        normalized_origin = origin_url.strip()
+        if not normalized_origin:
+            return None
+        host = ""
+        base_url = ""
+        if normalized_origin.startswith("git@") and ":" in normalized_origin:
+            host_path = normalized_origin[4:]
+            host, repo_path = host_path.split(":", 1)
+            base_url = f"https://{host}/{repo_path}"
+        elif normalized_origin.startswith("ssh://"):
+            parsed = urlparse(normalized_origin)
+            if not parsed.hostname or not parsed.path:
+                return None
+            host = parsed.hostname
+            base_url = f"https://{host}/{parsed.path.lstrip('/')}"
+        else:
+            parsed = urlparse(normalized_origin)
+            if not parsed.scheme or not parsed.netloc or not parsed.path:
+                return None
+            host = parsed.netloc
+            base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        trimmed_base_url = base_url.removesuffix(".git").rstrip("/")
+        encoded_ref = quote(ref.strip(), safe="/")
+        if host.endswith("github.com"):
+            return f"{trimmed_base_url}/blob/{encoded_ref}"
+        if host.endswith("gitlab.com"):
+            return f"{trimmed_base_url}/-/blob/{encoded_ref}"
+        return None
 
     def _acquire_preview_edit_slot(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -598,6 +599,57 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(calls[0], "delete:456")
         self.assertIn("最终回复", calls[1])
+
+    def test_build_final_result_message_renders_repo_file_reference_as_github_link(self) -> None:
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        file_path = repo_dir / "src" / "demo" / "app.py"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("print('hello')\n", encoding="utf-8")
+
+        init_result = subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=repo_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if init_result.returncode != 0:
+            subprocess.run(
+                ["git", "init"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "checkout", "-B", "main"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/example/demo.git"],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "demo")
+        self.app.storage.bind_session_path(session.id, 1, str(repo_dir))
+
+        final_text, parse_mode = self.app._build_final_result_message(
+            f"查看文件：[app.py]({file_path}#L1)",
+            session_id=session.id,
+        )
+
+        self.assertEqual(parse_mode, "HTML")
+        self.assertIn(
+            '<a href="https://github.com/example/demo/blob/main/src/demo/app.py#L1">app.py</a>',
+            final_text,
+        )
 
     def test_safe_send_message_can_schedule_retry_when_rate_limited(self) -> None:
         def fake_send_message(**kwargs) -> TelegramMessage:

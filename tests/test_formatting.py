@@ -42,6 +42,23 @@ class FormattingTestCase(unittest.TestCase):
         self.assertIn("<code>/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11</code>", html)
         self.assertNotIn("[cli.py:11]", html)
 
+    def test_markdown_to_telegram_html_uses_resolved_local_file_links(self) -> None:
+        markdown = "位置：[cli.py:11](/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11)"
+
+        html = markdown_to_telegram_html(
+            markdown,
+            local_link_resolver=lambda target: (
+                "https://github.com/example/megaverse_lab/blob/main/src/megaverse_lab/cli.py#L11"
+                if target == "/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11"
+                else None
+            ),
+        )
+
+        self.assertIn(
+            '<a href="https://github.com/example/megaverse_lab/blob/main/src/megaverse_lab/cli.py#L11">cli.py:11</a>',
+            html,
+        )
+
     def test_split_markdown_message_keeps_code_blocks_renderable(self) -> None:
         code_lines = "\n".join(f"print({index})" for index in range(40))
         markdown = f"前言\n\n```python\n{code_lines}\n```\n\n收尾"

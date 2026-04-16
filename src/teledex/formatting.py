@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+from typing import Callable
 
 
 _CITATION_PATTERNS = [
@@ -93,7 +94,10 @@ def split_markdown_message(text: str, max_length: int) -> list[str]:
     return parts or [normalized]
 
 
-def markdown_to_telegram_html(text: str) -> str:
+def markdown_to_telegram_html(
+    text: str,
+    local_link_resolver: Callable[[str], str | None] | None = None,
+) -> str:
     normalized = strip_citations(text).replace("\r\n", "\n").strip()
     if not normalized:
         return ""
@@ -111,7 +115,7 @@ def markdown_to_telegram_html(text: str) -> str:
                 in_code_block = False
             else:
                 if paragraph_lines:
-                    chunks.append(_render_paragraph(paragraph_lines))
+                    chunks.append(_render_paragraph(paragraph_lines, local_link_resolver))
                     paragraph_lines = []
                 in_code_block = True
             continue
@@ -122,42 +126,47 @@ def markdown_to_telegram_html(text: str) -> str:
 
         if not line.strip():
             if paragraph_lines:
-                chunks.append(_render_paragraph(paragraph_lines))
+                chunks.append(_render_paragraph(paragraph_lines, local_link_resolver))
                 paragraph_lines = []
             continue
 
         heading_match = _HEADING_PATTERN.match(line)
         if heading_match:
             if paragraph_lines:
-                chunks.append(_render_paragraph(paragraph_lines))
+                chunks.append(_render_paragraph(paragraph_lines, local_link_resolver))
                 paragraph_lines = []
-            chunks.append(f"<b>{_render_inline(heading_match.group(1).strip())}</b>")
+            chunks.append(
+                f"<b>{_render_inline(heading_match.group(1).strip(), local_link_resolver)}</b>"
+            )
             continue
 
         unordered_match = _UNORDERED_LIST_PATTERN.match(line)
         if unordered_match:
             if paragraph_lines:
-                chunks.append(_render_paragraph(paragraph_lines))
+                chunks.append(_render_paragraph(paragraph_lines, local_link_resolver))
                 paragraph_lines = []
-            chunks.append(f"• {_render_inline(unordered_match.group(1).strip())}")
+            chunks.append(
+                f"• {_render_inline(unordered_match.group(1).strip(), local_link_resolver)}"
+            )
             continue
 
         ordered_match = _ORDERED_LIST_PATTERN.match(line)
         if ordered_match:
             if paragraph_lines:
-                chunks.append(_render_paragraph(paragraph_lines))
+                chunks.append(_render_paragraph(paragraph_lines, local_link_resolver))
                 paragraph_lines = []
             chunks.append(
-                f"{ordered_match.group(1)}. {_render_inline(ordered_match.group(2).strip())}"
+                f"{ordered_match.group(1)}. "
+                f"{_render_inline(ordered_match.group(2).strip(), local_link_resolver)}"
             )
             continue
 
         if line.lstrip().startswith(">"):
             if paragraph_lines:
-                chunks.append(_render_paragraph(paragraph_lines))
+                chunks.append(_render_paragraph(paragraph_lines, local_link_resolver))
                 paragraph_lines = []
             quote_text = re.sub(r"^\s*>\s?", "", line, count=1)
-            chunks.append(f"&gt; {_render_inline(quote_text)}")
+            chunks.append(f"&gt; {_render_inline(quote_text, local_link_resolver)}")
             continue
 
         paragraph_lines.append(line.strip())
@@ -165,7 +174,7 @@ def markdown_to_telegram_html(text: str) -> str:
     if in_code_block:
         chunks.append(_render_code_block(code_lines))
     elif paragraph_lines:
-        chunks.append(_render_paragraph(paragraph_lines))
+        chunks.append(_render_paragraph(paragraph_lines, local_link_resolver))
 
     html_text = "\n".join(chunks).strip()
     return html_text or html.escape(normalized)
@@ -267,8 +276,11 @@ def _split_plain_text(text: str, max_length: int) -> list[str]:
     return [part for part in parts if part]
 
 
-def _render_paragraph(lines: list[str]) -> str:
-    return _render_inline("\n".join(line.strip() for line in lines))
+def _render_paragraph(
+    lines: list[str],
+    local_link_resolver: Callable[[str], str | None] | None = None,
+) -> str:
+    return _render_inline("\n".join(line.strip() for line in lines), local_link_resolver)
 
 
 def _render_code_block(lines: list[str]) -> str:
@@ -278,7 +290,10 @@ def _render_code_block(lines: list[str]) -> str:
     return f"<pre><code>{content}</code></pre>"
 
 
-def _render_inline(text: str) -> str:
+def _render_inline(
+    text: str,
+    local_link_resolver: Callable[[str], str | None] | None = None,
+) -> str:
     code_placeholders: dict[str, str] = {}
 
     def replace_code(match: re.Match[str]) -> str:
@@ -292,7 +307,7 @@ def _render_inline(text: str) -> str:
     for _ in range(3):
         previous = rendered
         rendered = _LINK_PATTERN.sub(
-            _render_markdown_link,
+            lambda match: _render_markdown_link(match, local_link_resolver),
             rendered,
         )
         rendered = _apply_wrapped_pattern(rendered, _STRONG_PATTERNS, "b")
@@ -313,11 +328,18 @@ def _apply_wrapped_pattern(text: str, patterns: list[re.Pattern[str]], tag: str)
     return rendered
 
 
-def _render_markdown_link(match: re.Match[str]) -> str:
+def _render_markdown_link(
+    match: re.Match[str],
+    local_link_resolver: Callable[[str], str | None] | None = None,
+) -> str:
     label = match.group(1)
     target = html.unescape(match.group(2)).strip()
     if not target:
         return label
     if target.startswith(("http://", "https://")):
         return f'<a href="{html.escape(target, quote=True)}">{label}</a>'
+    if local_link_resolver is not None:
+        resolved_target = local_link_resolver(target)
+        if resolved_target:
+            return f'<a href="{html.escape(resolved_target, quote=True)}">{label}</a>'
     return f"{label} <code>{html.escape(target)}</code>"
