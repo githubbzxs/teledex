@@ -2542,17 +2542,26 @@ class TeledexApp:
                 platform=active_run.platform,
             )
             return
-        final_text, parse_mode = self._build_final_result_message(
-            text,
-            session_id=active_run.session_id,
-        )
-        self._safe_send_message(
-            active_run.chat_id,
-            final_text,
-            active_run.message_thread_id,
-            parse_mode=parse_mode,
-            defer_on_rate_limit=True,
+        final_text = text.strip() or "Completed, but there was no final reply to display."
+        final_html = self._render_telegram_html(final_text, session_id=active_run.session_id)
+        if final_html and len(final_html) <= 3500:
+            self._safe_send_message(
+                active_run.chat_id,
+                final_html,
+                active_run.message_thread_id,
+                parse_mode="HTML",
+                defer_on_rate_limit=True,
+                user_id=active_run.user_id,
+            )
+            return
+        self._send_long_message(
+            chat_id=active_run.chat_id,
+            text=final_text,
+            message_thread_id=active_run.message_thread_id,
+            prefer_html=True,
             user_id=active_run.user_id,
+            platform=active_run.platform,
+            telegram_html_session_id=active_run.session_id,
         )
 
     def _build_final_result_message(
@@ -2922,6 +2931,7 @@ class TeledexApp:
         prefer_html: bool = False,
         user_id: int | None = None,
         platform: str | None = None,
+        telegram_html_session_id: int | None = None,
     ) -> None:
         resolved_platform = self._resolve_platform(platform, user_id, chat_id)
         if resolved_platform == _PLATFORM_DISCORD:
@@ -2945,7 +2955,10 @@ class TeledexApp:
         for index, part in enumerate(parts):
             current_reply_to = reply_to_message_id if index == 0 else None
             if prefer_html:
-                html_text = markdown_to_telegram_html(part)
+                html_text = self._render_telegram_html(
+                    part,
+                    session_id=telegram_html_session_id,
+                )
                 sent = self._safe_send_message(
                     chat_id=chat_id,
                     text=html_text,
