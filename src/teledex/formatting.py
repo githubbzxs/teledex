@@ -64,6 +64,9 @@ _STRIKE_PATTERN = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~", flags=re.DOTALL)
 _HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(.*)$")
 _UNORDERED_LIST_PATTERN = re.compile(r"^\s*[-*+]\s+(.*)$")
 _ORDERED_LIST_PATTERN = re.compile(r"^\s*(\d+)\.\s+(.*)$")
+_LEADING_LABEL_PATTERN = re.compile(
+    r"^(?P<indent>\s*)(?P<label>[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff /&+_-]{0,30}[：:])(?P<spacing>\s*)(?P<body>\S.*)$"
+)
 
 
 def split_markdown_message(text: str, max_length: int) -> list[str]:
@@ -294,6 +297,7 @@ def _render_inline(
     text: str,
     local_link_resolver: Callable[[str], str | None] | None = None,
 ) -> str:
+    text = _auto_bold_leading_labels(text)
     code_placeholders: dict[str, str] = {}
 
     def replace_code(match: re.Match[str]) -> str:
@@ -343,3 +347,26 @@ def _render_markdown_link(
         if resolved_target:
             return f'<a href="{html.escape(resolved_target, quote=True)}">{label}</a>'
     return f"{label} <code>{html.escape(target)}</code>"
+
+
+def _auto_bold_leading_labels(text: str) -> str:
+    lines: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if (
+            not stripped
+            or stripped.startswith(("**", "__", "`"))
+            or stripped.startswith(("http://", "https://"))
+        ):
+            lines.append(line)
+            continue
+        match = _LEADING_LABEL_PATTERN.match(line)
+        if not match:
+            lines.append(line)
+            continue
+        indent = str(match.group("indent"))
+        label = str(match.group("label"))
+        spacing = str(match.group("spacing"))
+        body = str(match.group("body"))
+        lines.append(f"{indent}**{label}**{spacing}{body}")
+    return "\n".join(lines)

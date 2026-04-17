@@ -42,6 +42,19 @@ class FormattingTestCase(unittest.TestCase):
         self.assertIn("<code>/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11</code>", html)
         self.assertNotIn("[cli.py:11]", html)
 
+    def test_markdown_to_telegram_html_auto_bolds_leading_labels(self) -> None:
+        markdown = (
+            "结论：保留粗体\n"
+            "验证：[app.py](https://example.com/app.py)\n"
+            "普通句子不会加粗"
+        )
+
+        html = markdown_to_telegram_html(markdown)
+
+        self.assertIn("<b>结论：</b>保留粗体", html)
+        self.assertIn('<b>验证：</b><a href="https://example.com/app.py">app.py</a>', html)
+        self.assertIn("普通句子不会加粗", html)
+
     def test_markdown_to_telegram_html_uses_resolved_local_file_links(self) -> None:
         markdown = "位置：[cli.py:11](/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11)"
 
