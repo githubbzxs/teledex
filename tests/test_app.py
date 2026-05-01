@@ -200,7 +200,7 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["reply_to_message_id"])
-        self.assertEqual(str(calls[0]["text"]), "○ 正在思考 (0m)")
+        self.assertEqual(str(calls[0]["text"]), "○ Thinking (0m)")
 
     def test_send_run_result_deletes_preview_and_sends_new_final_message(self) -> None:
         active_run = ActiveRun(
@@ -914,7 +914,7 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["○ 正在思考 (0m)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
@@ -964,7 +964,7 @@ class AppMessagingTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(calls, ["○ 正在思考 (0m)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session.id, self.app._active_runs)
         self.assertTrue(self.app._active_runs[session.id].stop_requested)
         self.assertTrue(self.app._active_runs[session.id].superseded_by_follow_up)
@@ -1229,7 +1229,7 @@ class AppMessagingTestCase(unittest.TestCase):
         with patch("teledex.app.threading.Thread", _FakeThread):
             self.app._handle_prompt(incoming)
 
-        self.assertEqual(calls, ["○ 正在思考 (0m)"])
+        self.assertEqual(calls, ["○ Thinking (0m)"])
         self.assertIn(session_1.id, self.app._active_runs)
         self.assertIn(session_2.id, self.app._active_runs)
 
@@ -1581,19 +1581,19 @@ class LivePreviewStateTestCase(unittest.TestCase):
     def test_status_line_tracks_elapsed_with_circle_animation(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.render(), "○ 正在思考 (0m)")
-        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=0), "● 正在思考 (0m)")
-        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=60), "○ 正在思考 (1m)")
+        self.assertEqual(preview.render(), "○ Thinking (0m)")
+        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=0), "● Thinking (0m)")
+        self.assertEqual(preview.advance(animate_steps=1, elapsed_seconds=60), "○ Thinking (1m)")
 
     def test_status_line_can_catch_up_multiple_elapsed_seconds(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=180), "● 正在思考 (3m)")
+        self.assertEqual(preview.advance(animate_steps=3, elapsed_seconds=180), "● Thinking (3m)")
 
     def test_status_line_accumulates_elapsed_even_when_animation_is_paused(self) -> None:
         preview = LivePreviewState(initial_status="Thinking")
 
-        self.assertEqual(preview.advance(animate_steps=0, elapsed_seconds=60), "○ 正在思考 (1m)")
+        self.assertEqual(preview.advance(animate_steps=0, elapsed_seconds=60), "○ Thinking (1m)")
 
     def test_stream_text_is_rendered_immediately(self) -> None:
         preview = LivePreviewState()
@@ -1601,7 +1601,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\nabcdef",
+            "○ Thinking (0m)\n\nabcdef",
         )
 
     def test_commentary_history_appends_instead_of_replacing(self) -> None:
@@ -1613,7 +1613,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\n先看目录\n\n再检查配置",
+            "○ Thinking (0m)\n\n先看目录\n\n再检查配置",
         )
 
     def test_command_output_is_hidden_from_preview(self) -> None:
@@ -1624,7 +1624,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
             output_text="first line\nsecond line",
         )
 
-        self.assertEqual(preview.render(), "○ 正在思考 (0m)")
+        self.assertEqual(preview.render(), "○ Thinking (0m)")
 
     def test_preview_hides_fenced_code_blocks_in_commentary(self) -> None:
         preview = LivePreviewState()
@@ -1635,7 +1635,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\n先检查逻辑\n\n再继续",
+            "○ Thinking (0m)\n\n先检查逻辑\n\n再继续",
         )
 
     def test_preview_replaces_code_only_commentary_with_generic_status(self) -> None:
@@ -1647,7 +1647,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\n正在梳理实现细节",
+            "○ Thinking (0m)\n\nWorking through implementation details",
         )
 
     def test_preview_hides_fenced_code_blocks_in_stream_text(self) -> None:
@@ -1656,7 +1656,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\n先说明\n\n后说明",
+            "○ Thinking (0m)\n\n先说明\n\n后说明",
         )
 
     def test_complete_keeps_final_status_line(self) -> None:
@@ -1665,7 +1665,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.complete(),
-            "● 已完成 (0m)\n\n完成内容",
+            "● Completed (0m)\n\n完成内容",
         )
 
     def test_commentary_can_be_kept_until_final_answer_starts(self) -> None:
@@ -1674,7 +1674,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\n**思考中**\n\nChecking files",
+            "○ Thinking (0m)\n\n**Thinking**\n\nChecking files",
         )
 
     def test_collaboration_active_hides_commentary_and_tool_state(self) -> None:
@@ -1683,7 +1683,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_tool_state("call_1", command_text="pwd", output_text="/root/teledex")
         preview.set_collaboration_active(True)
 
-        self.assertEqual(preview.render(), "○ 正在思考 (0m)")
+        self.assertEqual(preview.render(), "○ Thinking (0m)")
 
     def test_collaboration_active_keeps_final_stream_visible(self) -> None:
         preview = LivePreviewState()
@@ -1693,7 +1693,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\n主线程最终输出",
+            "○ Thinking (0m)\n\n主线程最终输出",
         )
 
     def test_footer_statusline_renders_at_bottom(self) -> None:
@@ -1702,7 +1702,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\ngpt-5.4 default · 100% left · ~/teledex",
+            "○ Thinking (0m)\n\ngpt-5.4 default · 100% left · ~/teledex",
         )
 
     def test_final_stream_clears_transient_sections(self) -> None:
@@ -1713,7 +1713,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\n最终输出",
+            "○ Thinking (0m)\n\n最终输出",
         )
 
     def test_complete_clears_transient_sections_and_keeps_final_output(self) -> None:
@@ -1722,7 +1722,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         preview.update_tool_state("call_1", command_text="cat README.md", output_text="hello")
         preview.update_stream_text("最终输出")
 
-        self.assertEqual(preview.complete(), "● 已完成 (0m)\n\n最终输出")
+        self.assertEqual(preview.complete(), "● Completed (0m)\n\n最终输出")
 
     def test_commentary_completed_keeps_process_text_before_final_output(self) -> None:
         preview = LivePreviewState()
@@ -1731,7 +1731,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         self.assertEqual(
             preview.render(),
-            "○ 正在思考 (0m)\n\n先检查 README",
+            "○ Thinking (0m)\n\n先检查 README",
         )
 
     def test_collaboration_delta_from_session_log_line_uses_parent_thread_boundary(self) -> None:
@@ -1891,7 +1891,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         app._safe_send_chat_action = lambda *args, **kwargs: None  # type: ignore[method-assign]
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
-        self.assertEqual(attempts, ["○ 正在思考 (0m)\n\n实时过程"])
+        self.assertEqual(attempts, ["○ Thinking (0m)\n\n实时过程"])
         self.assertFalse(preview.has_pending_stream())
 
     def test_preview_loop_does_not_advance_animation_while_flushing_stream(self) -> None:
@@ -1958,7 +1958,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
         app._safe_send_chat_action = lambda *args, **kwargs: None  # type: ignore[method-assign]
         app._run_preview_loop(active_run, preview, stop_event)  # type: ignore[arg-type]
 
-        self.assertEqual(attempts, ["● 正在思考 (0m)\n\n继续思考"])
+        self.assertEqual(attempts, ["● Thinking (0m)\n\n继续思考"])
 
     def test_preview_loop_skips_typing_when_preview_message_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2034,7 +2034,7 @@ class LivePreviewStateTestCase(unittest.TestCase):
 
         rendered = preview.render_final_html()
 
-        self.assertIn("● 已完成 (0m)", rendered)
+        self.assertIn("● Completed (0m)", rendered)
         self.assertIn("<b>标题</b>", rendered)
         self.assertIn("• 列表项", rendered)
         self.assertIn("<b>加粗</b>", rendered)
