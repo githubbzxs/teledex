@@ -140,9 +140,9 @@ class CodexRunnerTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(parsed.status_text, "Thinking")
-        self.assertEqual(parsed.commentary_id, "reasoning:reasoning_1")
-        self.assertEqual(parsed.commentary_text, "**Thinking**\n\n先检查目录，再确认配置。")
+        self.assertIsNone(parsed.status_text)
+        self.assertIsNone(parsed.commentary_id)
+        self.assertIsNone(parsed.commentary_text)
 
     def test_parse_event_line_ignores_plan_updates_in_preview_body(self) -> None:
         parsed = self.runner.parse_event_line(

@@ -267,17 +267,7 @@ class CodexRunner:
         if event_type == "plan.updated":
             return ParsedCodexEvent(footer_statusline=footer_statusline)
         if event_type == "reasoning.updated":
-            text = str(payload.get("text") or "").rstrip()
-            item_id = str(payload.get("item_id") or "").strip()
-            if not text or not item_id:
-                return ParsedCodexEvent(footer_statusline=footer_statusline)
-            return _with_footer(
-                ParsedCodexEvent(
-                    status_text="Thinking",
-                    commentary_id=f"reasoning:{item_id}",
-                    commentary_text=text,
-                )
-            )
+            return ParsedCodexEvent(footer_statusline=footer_statusline)
         if event_type == "command.output":
             text = str(payload.get("text") or "").rstrip()
             item_id = str(payload.get("item_id") or "").strip() or None
