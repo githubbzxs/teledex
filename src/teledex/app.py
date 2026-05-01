@@ -192,12 +192,12 @@ class RepoWebContext:
 class LivePreviewState:
     def __init__(
         self,
-        initial_status: str = "Thinking",
+        initial_status: str = "正在准备会话...",
         history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
         output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
         tool_output_max_chars: int = _PREVIEW_TOOL_OUTPUT_MAX_CHARS,
     ) -> None:
-        self._status_text = initial_status.strip() or "Thinking"
+        self._status_text = initial_status.strip() or "正在准备会话..."
         self._target_text = ""
         self._commentary_order: list[str] = []
         self._commentary_text_by_id: dict[str, str] = {}
@@ -239,6 +239,7 @@ class LivePreviewState:
                 self._tool_command_by_id.clear()
                 self._tool_output_by_id.clear()
             self._target_text = normalized
+            self._status_text = "正在输出..."
             self._in_progress = True
             self._flush_requested = True
 
@@ -371,7 +372,7 @@ class LivePreviewState:
             return self._render_locked()
 
     def complete(self) -> str:
-        return self.finish("Completed")
+        return self.finish("已完成")
 
     def _render_locked(self) -> str:
         marker = (
@@ -379,12 +380,12 @@ class LivePreviewState:
             if self._in_progress
             else _PREVIEW_COMPLETE_FRAME
         )
-        sections = [
-            f"{marker} {self._status_text} ({_format_elapsed_compact(self._elapsed_seconds)})"
-        ]
+        status_text = _format_preview_status_text(self._status_text)
+        sections = [f"思考时间：{_format_elapsed_seconds(self._elapsed_seconds)}"]
         body = self._build_body_locked()
         if body:
             sections.extend(["", body])
+        sections.extend(["", f"statusline：{marker} {status_text}".strip()])
         if self._footer_statusline:
             sections.extend(["", self._footer_statusline])
         rendered = "\n".join(sections).strip()
@@ -396,18 +397,18 @@ class LivePreviewState:
             if self._in_progress
             else _PREVIEW_COMPLETE_FRAME
         )
-        sections = [
-            html.escape(
-                f"{marker} {self._status_text} ({_format_elapsed_compact(self._elapsed_seconds)})"
-            )
-        ]
+        status_text = _format_preview_status_text(self._status_text)
+        sections = [html.escape(f"思考时间：{_format_elapsed_seconds(self._elapsed_seconds)}")]
         if self._target_text:
             sections.extend(
                 [
                     "",
+                    html.escape("输出预览："),
+                    "",
                     markdown_to_telegram_html(self._target_text) or html.escape(self._target_text),
                 ]
             )
+        sections.extend(["", html.escape(f"statusline：{marker} {status_text}".strip())])
         if self._footer_statusline:
             sections.extend(["", html.escape(self._footer_statusline)])
         return "\n".join(sections).strip()
@@ -420,16 +421,16 @@ class LivePreviewState:
                 self._output_max_chars,
             )
             if output_text:
-                sections.append(output_text)
+                sections.append(f"输出预览：\n{output_text}")
         else:
             if self._collaboration_active:
                 return ""
             commentary = self._render_commentary_locked()
             if commentary:
-                sections.append(commentary)
+                sections.append(f"思考过程：\n{commentary}")
             tool_blocks = self._render_tool_blocks_locked()
             if tool_blocks:
-                sections.append(tool_blocks)
+                sections.append(f"工具输出：\n{tool_blocks}")
 
         return "\n\n".join(section for section in sections if section).strip()
 
@@ -465,7 +466,19 @@ def _sanitize_preview_text(text: str) -> str:
     sanitized = sanitized.strip()
     if sanitized:
         return sanitized
-    return "Working through implementation details"
+    return "正在梳理实现细节"
+
+
+def _format_preview_status_text(text: str) -> str:
+    normalized = " ".join(text.split()).strip()
+    return {
+        "Thinking": "正在思考...",
+        "Working": "正在处理...",
+        "Completed": "已完成",
+        "Failed": "执行失败",
+        "Interrupted": "已中断",
+        "Stopped": "已停止",
+    }.get(normalized, text.strip() or "正在准备会话...")
 
 
 def _truncate_preview_middle(text: str, max_chars: int) -> str:
@@ -497,6 +510,15 @@ def _format_elapsed_compact(seconds: float) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes = remainder // 60
     return f"{hours}h {minutes:02d}m"
+
+
+def _format_elapsed_seconds(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def _utc_now_iso() -> str:
