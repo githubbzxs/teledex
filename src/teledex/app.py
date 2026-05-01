@@ -192,12 +192,12 @@ class RepoWebContext:
 class LivePreviewState:
     def __init__(
         self,
-        initial_status: str = "Thinking",
+        initial_status: str = "正在思考",
         history_max_chars: int = _PREVIEW_HISTORY_MAX_CHARS,
         output_max_chars: int = _PREVIEW_OUTPUT_MAX_CHARS,
         tool_output_max_chars: int = _PREVIEW_TOOL_OUTPUT_MAX_CHARS,
     ) -> None:
-        self._status_text = initial_status.strip() or "Thinking"
+        self._status_text = initial_status.strip() or "正在思考"
         self._target_text = ""
         self._commentary_order: list[str] = []
         self._commentary_text_by_id: dict[str, str] = {}
@@ -371,7 +371,7 @@ class LivePreviewState:
             return self._render_locked()
 
     def complete(self) -> str:
-        return self.finish("Completed")
+        return self.finish("已完成")
 
     def _render_locked(self) -> str:
         marker = (
@@ -380,7 +380,7 @@ class LivePreviewState:
             else _PREVIEW_COMPLETE_FRAME
         )
         sections = [
-            f"{marker} {self._status_text} ({_format_elapsed_compact(self._elapsed_seconds)})"
+            f"{marker} {_localize_preview_status(self._status_text)} ({_format_elapsed_compact(self._elapsed_seconds)})"
         ]
         body = self._build_body_locked()
         if body:
@@ -461,11 +461,49 @@ def _sanitize_preview_text(text: str) -> str:
     if not normalized:
         return ""
     sanitized = re.sub(r"```[\s\S]*?```", "", normalized)
+    sanitized = _localize_preview_markers(sanitized)
     sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
     sanitized = sanitized.strip()
     if sanitized:
         return sanitized
-    return "Working through implementation details"
+    return "正在梳理实现细节"
+
+
+def _localize_preview_status(text: str) -> str:
+    normalized = " ".join(text.split()).strip()
+    return {
+        "Thinking": "正在思考",
+        "Working": "处理中",
+        "Completed": "已完成",
+        "Failed": "执行失败",
+        "Interrupted": "已中断",
+        "Stopped": "已停止",
+    }.get(normalized, text.strip() or "正在思考")
+
+
+def _localize_preview_markers(text: str) -> str:
+    replacements = {
+        "Thinking": "思考中",
+        "Planning": "规划中",
+        "Working": "处理中",
+        "Output preview": "输出预览",
+        "Tool output": "工具输出",
+        "Thoughts": "思考摘要",
+    }
+
+    def replace_bold(match: re.Match[str]) -> str:
+        label = " ".join(match.group(1).split()).strip()
+        replacement = replacements.get(label)
+        return f"**{replacement}**" if replacement else match.group(0)
+
+    localized = re.sub(r"\*\*([^*\n]+)\*\*", replace_bold, text)
+    for source, target in replacements.items():
+        localized = re.sub(
+            rf"(?m)^(#{1,6}\s*)?{re.escape(source)}\s*$",
+            lambda match, target=target: f"{match.group(1) or ''}{target}",
+            localized,
+        )
+    return localized
 
 
 def _truncate_preview_middle(text: str, max_chars: int) -> str:
