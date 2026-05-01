@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from teledex.codex_app_server_exec import (
+    _build_turn_start_params,
     _build_footer_statusline,
     _execution_overrides,
     _extract_reasoning_effort,
@@ -68,6 +69,21 @@ class CodexAppServerExecTestCase(unittest.TestCase):
         )
 
         self.assertEqual(line, "gpt-5.4 medium · 100% left · ~/teledex")
+
+    def test_build_turn_start_params_requests_chinese_runtime_summaries(self) -> None:
+        class Args:
+            model = None
+            service_tier = None
+            reasoning_effort = None
+            personality = None
+            collaboration_mode = None
+
+        params = _build_turn_start_params("thread-1", "继续处理", Args(), None, None)
+
+        text = params["input"][0]["text"]
+        self.assertIn("思考过程摘要", text)
+        self.assertIn("必须使用简体中文", text)
+        self.assertIn("User message:\n继续处理", text)
 
 
 if __name__ == "__main__":

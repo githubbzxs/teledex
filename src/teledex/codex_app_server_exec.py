@@ -25,6 +25,10 @@ _DEFAULT_STATUS_LINE_ITEMS = (
     "current-dir",
 )
 _FAST_STATUS_MODEL = "gpt-5.4"
+_TELEDEX_RUNTIME_INSTRUCTION = (
+    "Teledex 桥接指令：运行中的 reasoning summary / commentary（也就是客户端可见的思考过程摘要）"
+    "必须使用简体中文。不要改变用户任务本身，也不要改变最终回答应使用的语言。"
+)
 
 
 class AppServerClient:
@@ -657,12 +661,16 @@ def _build_turn_start_params(
     fallback_model: str | None,
     fallback_effort: str | None,
 ) -> dict[str, Any]:
+    bridge_prompt = (
+        f"{_TELEDEX_RUNTIME_INSTRUCTION}\n\n"
+        f"User message:\n{prompt}"
+    )
     params: dict[str, Any] = {
         "threadId": thread_id,
         "input": [
             {
                 "type": "text",
-                "text": prompt,
+                "text": bridge_prompt,
                 "text_elements": [],
             }
         ],
