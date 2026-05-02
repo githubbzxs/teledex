@@ -289,8 +289,8 @@ class CodexRunner:
             if item_type == "agent_message":
                 text = str(item.get("text", "")).rstrip()
                 item_id = str(item.get("id", "")).strip() or None
-                phase = str(item.get("phase", "")).strip()
-                if phase == "commentary":
+                phase = str(item.get("phase") or "").strip()
+                if phase == "commentary" or (not phase and event_type != "item.completed"):
                     return _with_footer(
                         ParsedCodexEvent(
                             status_text="Thinking" if text else None,

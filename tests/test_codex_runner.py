@@ -97,6 +97,48 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertEqual(parsed.commentary_text, "我先检查目录")
         self.assertIsNone(parsed.final_message)
 
+    def test_parse_event_line_treats_unphased_stream_as_commentary(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "item.updated",
+                    "item": {
+                        "type": "agent_message",
+                        "id": "msg_1",
+                        "phase": None,
+                        "text": "我先检查现有日志",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(parsed.status_text, "Thinking")
+        self.assertEqual(parsed.commentary_id, "msg_1")
+        self.assertEqual(parsed.commentary_text, "我先检查现有日志")
+        self.assertIsNone(parsed.preview_text)
+        self.assertIsNone(parsed.final_message)
+
+    def test_parse_event_line_keeps_completed_unphased_agent_message_as_final(self) -> None:
+        parsed = self.runner.parse_event_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "id": "msg_1",
+                        "phase": None,
+                        "text": "处理完成",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertIsNone(parsed.commentary_id)
+        self.assertIsNone(parsed.preview_text)
+        self.assertEqual(parsed.final_message, "处理完成")
+
     def test_parse_event_line_marks_completed_commentary_for_cleanup(self) -> None:
         parsed = self.runner.parse_event_line(
             json.dumps(
