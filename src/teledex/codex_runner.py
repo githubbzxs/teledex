@@ -47,6 +47,12 @@ _SHELL_MANAGED_ENV_KEYS = {
 _SHELL_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _create_runtime_file_path(runtime_dir: Path, prefix: str, suffix: str) -> Path:
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=runtime_dir)
+    os.close(fd)
+    return Path(path)
+
+
 @dataclass(slots=True)
 class CodexProcessHandle:
     session_id: int
@@ -170,18 +176,10 @@ class CodexRunner:
         settings: dict[str, Any] | None = None,
     ) -> CodexProcessHandle:
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        output_file = Path(
-            tempfile.mkstemp(prefix="codex-last-", suffix=".txt", dir=runtime_dir)[1]
-        )
-        event_log_file = Path(
-            tempfile.mkstemp(prefix="codex-events-", suffix=".jsonl", dir=runtime_dir)[1]
-        )
-        status_file = Path(
-            tempfile.mkstemp(prefix="codex-status-", suffix=".json", dir=runtime_dir)[1]
-        )
-        prompt_file = Path(
-            tempfile.mkstemp(prefix="codex-prompt-", suffix=".txt", dir=runtime_dir)[1]
-        )
+        output_file = _create_runtime_file_path(runtime_dir, "codex-last-", ".txt")
+        event_log_file = _create_runtime_file_path(runtime_dir, "codex-events-", ".jsonl")
+        status_file = _create_runtime_file_path(runtime_dir, "codex-status-", ".json")
+        prompt_file = _create_runtime_file_path(runtime_dir, "codex-prompt-", ".txt")
         prompt_file.write_text(prompt, encoding="utf-8")
         status_file.unlink(missing_ok=True)
 
