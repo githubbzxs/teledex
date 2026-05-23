@@ -98,6 +98,7 @@ _MIRRORED_CODEX_COMMANDS = {
     "/fast",
     "/feedback",
     "/fork",
+    "/goal",
     "/init",
     "/logout",
     "/mcp",
@@ -121,14 +122,38 @@ _MIRRORED_CODEX_COMMANDS = {
     "/subagents",
     "/theme",
 }
+_UNSET = object()
 _APPROVAL_POLICY_VALUES = ("untrusted", "on-failure", "on-request", "never")
 _SANDBOX_MODE_VALUES = ("read-only", "workspace-write", "danger-full-access")
 _PERSONALITY_VALUES = ("none", "friendly", "pragmatic")
 _REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
 _COLLABORATION_MODE_VALUES = ("default", "plan")
+_GOAL_STATUS_ALIASES = {
+    "active": "active",
+    "resume": "active",
+    "resumed": "active",
+    "on": "active",
+    "paused": "paused",
+    "pause": "paused",
+    "blocked": "blocked",
+    "block": "blocked",
+    "complete": "complete",
+    "completed": "complete",
+    "done": "complete",
+    "usage-limited": "usageLimited",
+    "usagelimited": "usageLimited",
+    "budget-limited": "budgetLimited",
+    "budgetlimited": "budgetLimited",
+}
+_GOAL_CLEAR_ACTIONS = {"clear", "delete", "remove", "reset", "off"}
+_GOAL_SHOW_ACTIONS = {"", "show", "status", "get"}
 _PLATFORM_TELEGRAM = "telegram"
 _PLATFORM_DISCORD = "discord"
 _LOCAL_LINK_LINE_SUFFIX_PATTERN = re.compile(r"^(?P<path>/.+?):(?P<line>\d+)(?::(?P<column>\d+))?$")
+_GOAL_BUDGET_PATTERN = re.compile(
+    r"(?P<prefix>^|\s)--(?:token-)?budget(?:=|\s+)(?P<value>\S+)"
+)
+_GOAL_BUDGET_WITHOUT_VALUE_PATTERN = re.compile(r"(^|\s)--(?:token-)?budget\s*$")
 
 
 def _session_title_from_path(path: Path) -> str:
@@ -1070,6 +1095,7 @@ class TeledexApp:
             "/clear": self._handle_codex_clear_command,
             "/resume": self._handle_codex_resume_command,
             "/fork": self._handle_codex_fork_command,
+            "/goal": self._handle_codex_goal_command,
             "/rename": self._handle_codex_rename_command,
             "/init": self._handle_codex_init_command,
             "/review": self._handle_codex_review_command,
@@ -1233,6 +1259,126 @@ class TeledexApp:
         self._safe_send_message(
             incoming.chat_id,
             f"Session #{session.id} forked to a new Codex thread: {new_thread_id}",
+            incoming.message_thread_id,
+        )
+
+    def _handle_codex_goal_command(self, incoming: IncomingMessage, args: str) -> None:
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        if self._is_session_running(session.id):
+            self._safe_send_message(
+                incoming.chat_id,
+                f"Session #{session.id} is running. /goal is unavailable until it finishes, or stop it first with /stop.",
+                incoming.message_thread_id,
+            )
+            return
+
+        try:
+            action_text, token_budget = self._parse_goal_args(args)
+        except ValueError as exc:
+            self._safe_send_message(
+                incoming.chat_id,
+                str(exc),
+                incoming.message_thread_id,
+            )
+            return
+        action_head = action_text.split(maxsplit=1)[0].lower() if action_text else ""
+        cwd = Path(session.bound_path)
+
+        if action_head in _GOAL_CLEAR_ACTIONS and action_text == action_head:
+            if not session.codex_thread_id:
+                self._safe_send_message(
+                    incoming.chat_id,
+                    "No goal is currently set for this session.",
+                    incoming.message_thread_id,
+                )
+                return
+            cleared = self.runner.clear_thread_goal(cwd, session.codex_thread_id)
+            self._safe_send_message(
+                incoming.chat_id,
+                "Cleared the current goal." if cleared else "No goal was set.",
+                incoming.message_thread_id,
+            )
+            return
+
+        if not action_text and token_budget is not _UNSET:
+            if not session.codex_thread_id:
+                self._safe_send_message(
+                    incoming.chat_id,
+                    "No goal is currently set for this session.",
+                    incoming.message_thread_id,
+                )
+                return
+            goal = self.runner.set_thread_goal(
+                cwd,
+                session.codex_thread_id,
+                token_budget=token_budget,
+            )
+            self._safe_send_message(
+                incoming.chat_id,
+                self._format_goal_update("Goal budget updated.", goal),
+                incoming.message_thread_id,
+            )
+            return
+
+        if action_head in _GOAL_SHOW_ACTIONS and action_text == action_head:
+            if not session.codex_thread_id:
+                self._safe_send_message(
+                    incoming.chat_id,
+                    "No goal is currently set for this session.\nUsage: /goal <objective>",
+                    incoming.message_thread_id,
+                )
+                return
+            goal = self.runner.get_thread_goal(cwd, session.codex_thread_id)
+            self._safe_send_message(
+                incoming.chat_id,
+                self._format_goal_status(goal),
+                incoming.message_thread_id,
+            )
+            return
+
+        status = self._normalize_goal_status_action(action_head)
+        if status is not None and action_text == action_head:
+            if not session.codex_thread_id:
+                self._safe_send_message(
+                    incoming.chat_id,
+                    "No goal is currently set for this session.",
+                    incoming.message_thread_id,
+                )
+                return
+            goal_kwargs: dict[str, object | None] = {"status": status}
+            if token_budget is not _UNSET:
+                goal_kwargs["token_budget"] = token_budget
+            goal = self.runner.set_thread_goal(
+                cwd,
+                session.codex_thread_id,
+                **goal_kwargs,
+            )
+            self._safe_send_message(
+                incoming.chat_id,
+                self._format_goal_update("Goal status updated.", goal),
+                incoming.message_thread_id,
+            )
+            return
+
+        thread_id = session.codex_thread_id or self.runner.start_thread(cwd, session.codex_settings)
+        if not session.codex_thread_id:
+            self.storage.update_session_thread_id(session.id, thread_id)
+        goal_kwargs: dict[str, object | None] = {
+            "objective": action_text,
+            "status": "active",
+        }
+        if token_budget is not _UNSET:
+            goal_kwargs["token_budget"] = token_budget
+        goal = self.runner.set_thread_goal(
+            cwd,
+            thread_id,
+            **goal_kwargs,
+        )
+        self._safe_send_message(
+            incoming.chat_id,
+            self._format_goal_update("Goal set.", goal),
             incoming.message_thread_id,
         )
 
@@ -1921,6 +2067,85 @@ class TeledexApp:
         target_model = "default" if model == "default" else model
         target_effort = "default" if effort in {None, 'default'} else effort
         return f"Model updated to: {target_model}\nReasoning effort: {target_effort}"
+
+    def _parse_goal_args(self, raw: str) -> tuple[str, int | None | object]:
+        text = raw.strip()
+        if not text:
+            return "", _UNSET
+        if _GOAL_BUDGET_WITHOUT_VALUE_PATTERN.search(text):
+            raise ValueError("Usage: /goal <objective> [--budget <tokens>]")
+
+        token_budget: int | None | object = _UNSET
+
+        def _replace_budget(match: re.Match[str]) -> str:
+            nonlocal token_budget
+            value = match.group("value").strip()
+            if value.lower() in {"none", "default", "clear", "off"}:
+                token_budget = None
+            else:
+                normalized = value.replace("_", "").replace(",", "")
+                try:
+                    parsed = int(normalized)
+                except ValueError as exc:
+                    raise ValueError("Token budget must be a positive integer.") from exc
+                if parsed <= 0:
+                    raise ValueError("Token budget must be a positive integer.")
+                token_budget = parsed
+            return match.group("prefix")
+
+        try:
+            stripped = _GOAL_BUDGET_PATTERN.sub(_replace_budget, text).strip()
+        except ValueError:
+            raise
+        return re.sub(r"\s{2,}", " ", stripped), token_budget
+
+    def _normalize_goal_status_action(self, value: str) -> str | None:
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        return _GOAL_STATUS_ALIASES.get(normalized)
+
+    def _format_goal_status(self, goal: dict[str, object] | None) -> str:
+        if not goal:
+            return "No goal is currently set for this session.\nUsage: /goal <objective>"
+        return "Current goal:\n" + self._format_goal_details(goal)
+
+    def _format_goal_update(self, heading: str, goal: dict[str, object]) -> str:
+        if not goal:
+            return f"{heading}\nGoal details are not available yet."
+        return f"{heading}\n{self._format_goal_details(goal)}"
+
+    def _format_goal_details(self, goal: dict[str, object]) -> str:
+        objective = str(goal.get("objective") or "").strip() or "(no objective)"
+        status = str(goal.get("status") or "active").strip() or "active"
+        token_budget = goal.get("tokenBudget")
+        tokens_used = self._goal_int(goal.get("tokensUsed"))
+        time_used = self._goal_int(goal.get("timeUsedSeconds"))
+        budget_text = self._format_goal_token_budget(token_budget)
+        lines = [
+            f"Objective: {objective}",
+            f"Status: {status}",
+            f"Tokens: {tokens_used:,} / {budget_text}",
+            f"Elapsed: {_format_elapsed_compact(time_used)}",
+        ]
+        return "\n".join(lines)
+
+    def _goal_int(self, value: object) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _format_goal_token_budget(self, value: object) -> str:
+        if value is None:
+            return "unlimited"
+        try:
+            budget = int(value)
+        except (TypeError, ValueError):
+            return "unlimited"
+        if budget <= 0:
+            return "unlimited"
+        return f"{budget:,}"
 
     def _handle_prompt(self, incoming: IncomingMessage) -> None:
         session = self.storage.get_active_session(

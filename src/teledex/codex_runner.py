@@ -45,6 +45,7 @@ _SHELL_MANAGED_ENV_KEYS = {
     "_",
 }
 _SHELL_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_GOAL_TOKEN_BUDGET_UNSET = object()
 
 
 def _create_runtime_file_path(runtime_dir: Path, prefix: str, suffix: str) -> Path:
@@ -418,6 +419,22 @@ class CodexRunner:
             ),
         )
 
+    def start_thread(self, cwd: Path, settings: dict[str, Any] | None = None) -> str:
+        resolved_cwd = cwd.expanduser().resolve()
+
+        def _request(client: AppServerClient) -> str:
+            args = self._runtime_args(resolved_cwd, settings or {}, thread_id=None)
+            binding = client.request_simple(
+                "thread/start",
+                _build_thread_start_params(args),
+            )
+            thread_id, thread_cwd = _resolve_thread_binding(binding)
+            if thread_cwd and Path(thread_cwd).resolve() != resolved_cwd:
+                raise RuntimeError(f"Codex 会话目录不一致：期望 {resolved_cwd}，实际 {thread_cwd}")
+            return thread_id
+
+        return self._with_app_server(resolved_cwd, _request)
+
     def set_thread_name(self, cwd: Path, thread_id: str, name: str) -> None:
         self._with_app_server(
             cwd,
@@ -429,6 +446,54 @@ class CodexRunner:
                 },
             ),
         )
+
+    def get_thread_goal(self, cwd: Path, thread_id: str) -> dict[str, Any] | None:
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "thread/goal/get",
+                {
+                    "threadId": thread_id,
+                },
+            ),
+        )
+        goal = response.get("goal") if isinstance(response, dict) else None
+        return goal if isinstance(goal, dict) else None
+
+    def set_thread_goal(
+        self,
+        cwd: Path,
+        thread_id: str,
+        *,
+        objective: str | None = None,
+        status: str | None = None,
+        token_budget: int | None | object = _GOAL_TOKEN_BUDGET_UNSET,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"threadId": thread_id}
+        if objective is not None:
+            params["objective"] = objective
+        if status is not None:
+            params["status"] = status
+        if token_budget is not _GOAL_TOKEN_BUDGET_UNSET:
+            params["tokenBudget"] = token_budget
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple("thread/goal/set", params),
+        )
+        goal = response.get("goal") if isinstance(response, dict) else None
+        return goal if isinstance(goal, dict) else {}
+
+    def clear_thread_goal(self, cwd: Path, thread_id: str) -> bool:
+        response = self._with_app_server(
+            cwd,
+            lambda client: client.request_simple(
+                "thread/goal/clear",
+                {
+                    "threadId": thread_id,
+                },
+            ),
+        )
+        return bool(response.get("cleared")) if isinstance(response, dict) else False
 
     def fork_thread(
         self,

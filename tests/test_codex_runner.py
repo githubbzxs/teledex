@@ -11,6 +11,16 @@ from teledex.codex_runner import CodexRunner
 from teledex.config import AppConfig
 
 
+class _FakeAppServerClient:
+    def __init__(self, responses: dict[str, dict]) -> None:
+        self.responses = responses
+        self.requests: list[tuple[str, dict]] = []
+
+    def request_simple(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
+        return self.responses.get(method, {})
+
+
 class CodexRunnerTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -371,6 +381,93 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertIn("model=gpt-5.4", message)
         self.assertNotIn("env -i", message)
         self.assertNotIn("GH_TOKEN", message)
+
+    def test_start_thread_uses_app_server_thread_start(self) -> None:
+        fake_client = _FakeAppServerClient(
+            {
+                "thread/start": {
+                    "thread": {
+                        "id": "thread-goal-1",
+                        "cwd": self.temp_dir.name,
+                    }
+                }
+            }
+        )
+
+        def fake_with_app_server(cwd: Path, callback):
+            self.assertEqual(cwd, Path(self.temp_dir.name).resolve())
+            return callback(fake_client)
+
+        self.runner._with_app_server = fake_with_app_server  # type: ignore[method-assign]
+
+        thread_id = self.runner.start_thread(Path(self.temp_dir.name))
+
+        self.assertEqual(thread_id, "thread-goal-1")
+        self.assertEqual(len(fake_client.requests), 1)
+        method, params = fake_client.requests[0]
+        self.assertEqual(method, "thread/start")
+        self.assertEqual(params["cwd"], self.temp_dir.name)
+        self.assertFalse(params["ephemeral"])
+        self.assertTrue(params["persistExtendedHistory"])
+        self.assertEqual(params["model"], "gpt-test")
+
+    def test_thread_goal_methods_use_app_server_goal_protocol(self) -> None:
+        fake_client = _FakeAppServerClient(
+            {
+                "thread/goal/get": {
+                    "goal": {
+                        "objective": "ship release",
+                        "status": "active",
+                    }
+                },
+                "thread/goal/set": {
+                    "goal": {
+                        "objective": "ship release",
+                        "status": "complete",
+                        "tokenBudget": None,
+                    }
+                },
+                "thread/goal/clear": {
+                    "cleared": True,
+                },
+            }
+        )
+
+        def fake_with_app_server(cwd: Path, callback):
+            self.assertEqual(cwd, Path(self.temp_dir.name))
+            return callback(fake_client)
+
+        self.runner._with_app_server = fake_with_app_server  # type: ignore[method-assign]
+
+        goal = self.runner.get_thread_goal(Path(self.temp_dir.name), "thread-123")
+        updated = self.runner.set_thread_goal(
+            Path(self.temp_dir.name),
+            "thread-123",
+            objective="ship release",
+            status="complete",
+            token_budget=None,
+        )
+        cleared = self.runner.clear_thread_goal(Path(self.temp_dir.name), "thread-123")
+
+        self.assertEqual(goal["objective"], "ship release")
+        self.assertEqual(updated["status"], "complete")
+        self.assertTrue(cleared)
+        self.assertEqual(
+            fake_client.requests,
+            [
+                ("thread/goal/get", {"threadId": "thread-123"}),
+                (
+                    "thread/goal/set",
+                    {
+                        "threadId": "thread-123",
+                        "objective": "ship release",
+                        "status": "complete",
+                        "tokenBudget": None,
+                    },
+                ),
+                ("thread/goal/clear", {"threadId": "thread-123"}),
+            ],
+        )
 
     def test_read_status_file_ignores_transient_empty_or_partial_json(self) -> None:
         status_file = Path(self.temp_dir.name) / "status.json"

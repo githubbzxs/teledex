@@ -1305,6 +1305,42 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(commands, [])
         self.assertEqual(codex_commands, ["/model"])
 
+    def test_handle_update_routes_goal_command_to_codex_handler(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        prompts: list[str] = []
+        commands: list[str] = []
+        codex_commands: list[str] = []
+
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming.text)
+
+        def fake_handle_command(incoming: IncomingMessage) -> None:
+            commands.append(incoming.text)
+
+        def fake_handle_codex_command(incoming: IncomingMessage) -> None:
+            codex_commands.append(incoming.text)
+
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+        self.app._handle_command = fake_handle_command  # type: ignore[method-assign]
+        self.app._handle_codex_command = fake_handle_codex_command  # type: ignore[method-assign]
+
+        self.app._handle_update(
+            {
+                "update_id": 33,
+                "message": {
+                    "message_id": 459,
+                    "text": "/goal ship the release",
+                    "from": {"id": 1},
+                    "chat": {"id": 100},
+                    "message_thread_id": 9,
+                },
+            }
+        )
+
+        self.assertEqual(prompts, [])
+        self.assertEqual(commands, [])
+        self.assertEqual(codex_commands, ["/goal ship the release"])
+
     def test_handle_update_keeps_unknown_non_builtin_slash_command_as_prompt(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         prompts: list[str] = []
@@ -1509,6 +1545,450 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(
             messages,
             [f"Session #{session.id} is running. /new is unavailable until it finishes, or stop it first with /stop."],
+        )
+
+    def test_handle_codex_goal_command_creates_thread_and_sets_goal(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        start_calls: list[tuple[str, dict[str, object]]] = []
+        set_calls: list[dict[str, object]] = []
+        messages: list[str] = []
+
+        def fake_start_thread(cwd: Path, settings: dict[str, object] | None = None) -> str:
+            start_calls.append((str(cwd), dict(settings or {})))
+            return "thread-goal-1"
+
+        def fake_set_thread_goal(
+            cwd: Path,
+            thread_id: str,
+            *,
+            objective: str | None = None,
+            status: str | None = None,
+            token_budget: int | None = None,
+        ) -> dict[str, object]:
+            set_calls.append(
+                {
+                    "cwd": str(cwd),
+                    "thread_id": thread_id,
+                    "objective": objective,
+                    "status": status,
+                    "token_budget": token_budget,
+                }
+            )
+            return {
+                "threadId": thread_id,
+                "objective": objective or "",
+                "status": status or "active",
+                "tokenBudget": token_budget,
+                "tokensUsed": 1200,
+                "timeUsedSeconds": 65,
+            }
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1001,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.start_thread = fake_start_thread  # type: ignore[method-assign]
+        self.app.runner.set_thread_goal = fake_set_thread_goal  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/goal ship release --budget 50,000",
+                message_id=125,
+                message_thread_id=9,
+            )
+        )
+
+        updated = self.app.storage.get_session(session.id, 1)
+        assert updated is not None
+        self.assertEqual(updated.codex_thread_id, "thread-goal-1")
+        self.assertEqual(start_calls, [(self.temp_dir.name, {})])
+        self.assertEqual(
+            set_calls,
+            [
+                {
+                    "cwd": self.temp_dir.name,
+                    "thread_id": "thread-goal-1",
+                    "objective": "ship release",
+                    "status": "active",
+                    "token_budget": 50000,
+                }
+            ],
+        )
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Goal set.", messages[0])
+        self.assertIn("Objective: ship release", messages[0])
+        self.assertIn("Tokens: 1,200 / 50,000", messages[0])
+
+    def test_handle_codex_goal_command_allows_objective_starting_with_clear(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "thread-123")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        clear_calls: list[tuple[str, str]] = []
+        set_calls: list[str | None] = []
+        messages: list[str] = []
+
+        def fake_clear_thread_goal(cwd: Path, thread_id: str) -> bool:
+            clear_calls.append((str(cwd), thread_id))
+            return True
+
+        def fake_set_thread_goal(
+            cwd: Path,
+            thread_id: str,
+            *,
+            objective: str | None = None,
+            status: str | None = None,
+            token_budget: int | None = None,
+        ) -> dict[str, object]:
+            set_calls.append(objective)
+            return {
+                "objective": objective or "",
+                "status": status or "active",
+                "tokenBudget": None,
+                "tokensUsed": 0,
+                "timeUsedSeconds": 0,
+            }
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1007,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.clear_thread_goal = fake_clear_thread_goal  # type: ignore[method-assign]
+        self.app.runner.set_thread_goal = fake_set_thread_goal  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/goal clear cache regression",
+                message_id=131,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(clear_calls, [])
+        self.assertEqual(set_calls, ["clear cache regression"])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Objective: clear cache regression", messages[0])
+
+    def test_handle_codex_goal_command_shows_current_goal(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "thread-123")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        messages: list[str] = []
+
+        def fake_get_thread_goal(cwd: Path, thread_id: str) -> dict[str, object]:
+            self.assertEqual(str(cwd), self.temp_dir.name)
+            self.assertEqual(thread_id, "thread-123")
+            return {
+                "objective": "finish tests",
+                "status": "active",
+                "tokenBudget": None,
+                "tokensUsed": 42,
+                "timeUsedSeconds": 3600,
+            }
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1002,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.get_thread_goal = fake_get_thread_goal  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/goal",
+                message_id=126,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Current goal:", messages[0])
+        self.assertIn("Objective: finish tests", messages[0])
+        self.assertIn("Tokens: 42 / unlimited", messages[0])
+        self.assertIn("Elapsed: 1h 00m", messages[0])
+
+    def test_handle_codex_goal_command_updates_status(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "thread-123")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        set_calls: list[dict[str, object]] = []
+        messages: list[str] = []
+
+        def fake_set_thread_goal(
+            cwd: Path,
+            thread_id: str,
+            *,
+            objective: str | None = None,
+            status: str | None = None,
+            token_budget: int | None = None,
+        ) -> dict[str, object]:
+            set_calls.append(
+                {
+                    "thread_id": thread_id,
+                    "objective": objective,
+                    "status": status,
+                    "token_budget": token_budget,
+                }
+            )
+            return {
+                "objective": "finish tests",
+                "status": status or "active",
+                "tokenBudget": None,
+                "tokensUsed": 0,
+                "timeUsedSeconds": 0,
+            }
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1003,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.set_thread_goal = fake_set_thread_goal  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/goal complete --budget 20000",
+                message_id=127,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(
+            set_calls,
+            [
+                {
+                    "thread_id": "thread-123",
+                    "objective": None,
+                    "status": "complete",
+                    "token_budget": 20000,
+                }
+            ],
+        )
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Goal status updated.", messages[0])
+        self.assertIn("Status: complete", messages[0])
+
+    def test_handle_codex_goal_command_updates_budget_only(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "thread-123")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        set_calls: list[dict[str, object]] = []
+        messages: list[str] = []
+
+        def fake_set_thread_goal(
+            cwd: Path,
+            thread_id: str,
+            *,
+            objective: str | None = None,
+            status: str | None = None,
+            token_budget: int | None = None,
+        ) -> dict[str, object]:
+            set_calls.append(
+                {
+                    "thread_id": thread_id,
+                    "objective": objective,
+                    "status": status,
+                    "token_budget": token_budget,
+                }
+            )
+            return {
+                "objective": "finish tests",
+                "status": "active",
+                "tokenBudget": token_budget,
+                "tokensUsed": 0,
+                "timeUsedSeconds": 0,
+            }
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1006,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.set_thread_goal = fake_set_thread_goal  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/goal --budget 20000",
+                message_id=130,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(
+            set_calls,
+            [
+                {
+                    "thread_id": "thread-123",
+                    "objective": None,
+                    "status": None,
+                    "token_budget": 20000,
+                }
+            ],
+        )
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Goal budget updated.", messages[0])
+        self.assertIn("Tokens: 0 / 20,000", messages[0])
+
+    def test_handle_codex_goal_command_clears_goal(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "thread-123")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        clear_calls: list[tuple[str, str]] = []
+        messages: list[str] = []
+
+        def fake_clear_thread_goal(cwd: Path, thread_id: str) -> bool:
+            clear_calls.append((str(cwd), thread_id))
+            return True
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1004,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.clear_thread_goal = fake_clear_thread_goal  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/goal clear",
+                message_id=128,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(clear_calls, [(self.temp_dir.name, "thread-123")])
+        self.assertEqual(messages, ["Cleared the current goal."])
+
+    def test_handle_codex_goal_command_rejects_running_session(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "thread-123")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        self.app._active_runs[session.id] = ActiveRun(
+            run_id=1,
+            session_id=session.id,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+        )
+        messages: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1005,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/goal finish",
+                message_id=129,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(
+            messages,
+            [f"Session #{session.id} is running. /goal is unavailable until it finishes, or stop it first with /stop."],
         )
 
     def test_legacy_twipe_command_does_not_clear_user_state(self) -> None:
