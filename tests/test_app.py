@@ -1991,6 +1991,91 @@ class AppMessagingTestCase(unittest.TestCase):
             [f"Session #{session.id} is running. /goal is unavailable until it finishes, or stop it first with /stop."],
         )
 
+    def test_handle_codex_status_uses_effective_codex_config(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        messages: list[str] = []
+
+        self.app.runner.read_config = lambda cwd: {  # type: ignore[method-assign]
+            "config": {
+                "model": "gpt-5.5",
+                "model_reasoning_effort": "xhigh",
+                "service_tier": "fast",
+            }
+        }
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1009,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/status",
+                message_id=140,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Model: gpt-5.5", messages[0])
+        self.assertIn("Effort: xhigh", messages[0])
+        self.assertIn("Fast: on", messages[0])
+
+    def test_handle_codex_fast_status_uses_effective_codex_config(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        messages: list[str] = []
+
+        self.app.runner.read_config = lambda cwd: {  # type: ignore[method-assign]
+            "config": {"service_tier": "fast"}
+        }
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1010,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/fast status",
+                message_id=141,
+                message_thread_id=9,
+            )
+        )
+
+        self.assertEqual(messages, ["Fast mode is currently: on"])
+
     def test_legacy_twipe_command_does_not_clear_user_state(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "teledex")

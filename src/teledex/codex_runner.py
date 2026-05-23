@@ -648,6 +648,7 @@ class CodexRunner:
         effective_settings = settings or {}
         model = str(effective_settings.get("model") or self.config.codex_model or "default")
         effort = str(effective_settings.get("reasoning_effort") or "default")
+        service_tier = str(effective_settings.get("service_tier") or "default")
         approval = str(effective_settings.get("approval_policy") or "default")
         sandbox = str(effective_settings.get("sandbox_mode") or "default")
         collaboration = str(effective_settings.get("collaboration_mode") or "default")
@@ -656,7 +657,7 @@ class CodexRunner:
         return (
             "通过持久 runtime 执行 Codex 会话："
             f" cwd={cwd} thread={thread_state} model={model}"
-            f" effort={effort} approval={approval}"
+            f" effort={effort} service_tier={service_tier} approval={approval}"
             f" sandbox={sandbox} collab={collaboration}"
             f" exec_mode={self.config.codex_exec_mode} search={search_state}"
         )
@@ -839,6 +840,73 @@ class CodexRunner:
         if client is not None:
             client.close()
 
+    def _read_runtime_config(
+        self,
+        client: AppServerClient,
+        cwd: Path,
+    ) -> dict[str, Any] | None:
+        try:
+            config_read = client.request_simple(
+                "config/read",
+                {
+                    "cwd": str(cwd),
+                    "includeLayers": False,
+                },
+            )
+        except RuntimeError:
+            return None
+        config = config_read.get("config") if isinstance(config_read, dict) else {}
+        return config if isinstance(config, dict) else {}
+
+    def _build_runtime_status_line_state(
+        self,
+        cwd: Path,
+        settings: dict[str, Any],
+        config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        status_line_state: dict[str, Any] = {
+            "cwd": cwd,
+            "model": "loading",
+            "status_line_items": _extract_status_line_items(config or {}),
+            "context_remaining_percent": 100,
+            "last_emitted_line": "",
+        }
+        self._refresh_runtime_status_line_state(status_line_state, settings, config)
+        return status_line_state
+
+    def _refresh_runtime_status_line_state(
+        self,
+        status_line_state: dict[str, Any],
+        settings: dict[str, Any],
+        config: dict[str, Any] | None,
+    ) -> None:
+        if config is not None:
+            status_line_state["status_line_items"] = _extract_status_line_items(config)
+
+        model = str(settings.get("model") or self.config.codex_model or "").strip()
+        if not model and config is not None:
+            model = str(config.get("model") or "").strip()
+        if model:
+            status_line_state["model"] = model
+        else:
+            status_line_state["model"] = "loading"
+
+        reasoning_effort = str(settings.get("reasoning_effort") or "").strip()
+        if not reasoning_effort and config is not None:
+            reasoning_effort = str(_extract_reasoning_effort(config) or "").strip()
+        if reasoning_effort:
+            status_line_state["reasoning_effort"] = reasoning_effort
+        else:
+            status_line_state.pop("reasoning_effort", None)
+
+        service_tier = str(settings.get("service_tier") or "").strip()
+        if not service_tier and config is not None:
+            service_tier = str(_extract_service_tier(config) or "").strip()
+        if service_tier:
+            status_line_state["service_tier"] = service_tier
+        else:
+            status_line_state.pop("service_tier", None)
+
     def _start_runtime_turn(
         self,
         runtime: _PersistentRuntime,
@@ -1013,38 +1081,31 @@ class CodexRunner:
 
         if client is None:
             client = AppServerClient.start(self.config.codex_bin, runtime.cwd)
-            config_read: dict[str, Any]
-            try:
-                config_read = client.request_simple(
-                    "config/read",
-                    {
-                        "cwd": str(runtime.cwd),
-                        "includeLayers": False,
-                    },
-                )
-            except RuntimeError:
-                config_read = {}
-            config = config_read.get("config") if isinstance(config_read, dict) else {}
-            status_line_state = {
-                "cwd": runtime.cwd,
-                "model": (
-                    str((config or {}).get("model") or "").strip()
-                    or str(settings.get("model") or self.config.codex_model or "").strip()
-                    or "loading"
-                ),
-                "reasoning_effort": (
-                    str(settings.get("reasoning_effort") or "").strip()
-                    or _extract_reasoning_effort(config)
-                ),
-                "service_tier": (
-                    str(settings.get("service_tier") or "").strip() or _extract_service_tier(config)
-                ),
-                "status_line_items": _extract_status_line_items(config),
-                "context_remaining_percent": 100,
-                "last_emitted_line": "",
-            }
+            config = self._read_runtime_config(client, runtime.cwd)
+            status_line_state = self._build_runtime_status_line_state(
+                runtime.cwd,
+                settings,
+                config,
+            )
             with runtime.state_lock:
                 runtime.client = client
+                runtime.status_line_state = status_line_state
+                bound_thread_id = runtime.bound_thread_id
+        else:
+            config = self._read_runtime_config(client, runtime.cwd)
+            if status_line_state is None:
+                status_line_state = self._build_runtime_status_line_state(
+                    runtime.cwd,
+                    settings,
+                    config,
+                )
+            else:
+                self._refresh_runtime_status_line_state(
+                    status_line_state,
+                    settings,
+                    config,
+                )
+            with runtime.state_lock:
                 runtime.status_line_state = status_line_state
                 bound_thread_id = runtime.bound_thread_id
 

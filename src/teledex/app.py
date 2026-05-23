@@ -1508,9 +1508,18 @@ class TeledexApp:
         session = self._require_bound_session_or_notify(incoming)
         if session is None:
             return
-        current = str(session.codex_settings.get("service_tier") or "").strip().lower() == "fast"
+        effective_config = self._read_effective_codex_config(session)
+        current_tier = self._effective_session_service_tier(session, effective_config)
+        current = current_tier == "fast"
         action = args.strip().lower()
         if action in {"", "toggle"}:
+            if current and session.codex_settings.get("service_tier") != "fast":
+                self._safe_send_message(
+                    incoming.chat_id,
+                    "Fast mode is enabled by the Codex default configuration. /fast off only clears the session override.",
+                    incoming.message_thread_id,
+                )
+                return
             enabled = not current
         elif action == "status":
             self._safe_send_message(
@@ -1534,7 +1543,11 @@ class TeledexApp:
             incoming,
             session,
             {"service_tier": "fast" if enabled else None},
-            f"Fast mode set to: {'on' if enabled else 'off'}",
+            (
+                "Fast mode override set to: on"
+                if enabled
+                else "Fast mode override cleared. The session now follows the Codex default."
+            ),
         )
 
     def _handle_codex_personality_command(self, incoming: IncomingMessage, args: str) -> None:
@@ -1695,20 +1708,72 @@ class TeledexApp:
         session = self._get_active_session_or_notify(incoming)
         if session is None:
             return
+        effective_config = self._read_effective_codex_config(session)
         lines = [
             f"Session #{session.id}",
             f"Directory: {session.bound_path or 'Not bound'}",
             f"Thread: {session.codex_thread_id or 'Not created'}",
             f"Status: {session.status}",
-            f"Model: {session.codex_settings.get('model') or self.config.codex_model or 'default'}",
-            f"Effort: {session.codex_settings.get('reasoning_effort') or 'default'}",
-            f"Fast: {'on' if session.codex_settings.get('service_tier') == 'fast' else 'off'}",
+            f"Model: {self._effective_session_model(session, effective_config)}",
+            f"Effort: {self._effective_session_reasoning_effort(session, effective_config)}",
+            f"Fast: {'on' if self._effective_session_service_tier(session, effective_config) == 'fast' else 'off'}",
             f"Personality: {session.codex_settings.get('personality') or 'default'}",
             f"Approval: {session.codex_settings.get('approval_policy') or 'default'}",
             f"Sandbox: {session.codex_settings.get('sandbox_mode') or 'default'}",
             f"Collab: {session.codex_settings.get('collaboration_mode') or 'default'}",
         ]
         self._safe_send_message(incoming.chat_id, "\n".join(lines), incoming.message_thread_id)
+
+    def _read_effective_codex_config(self, session: SessionRecord) -> dict[str, object]:
+        if not session.bound_path:
+            return {}
+        try:
+            config_read = self.runner.read_config(Path(session.bound_path))
+        except Exception:
+            self.logger.exception("读取 Codex 有效配置失败：session_id=%s", session.id)
+            return {}
+        config = config_read.get("config") if isinstance(config_read, dict) else {}
+        return config if isinstance(config, dict) else {}
+
+    def _effective_session_model(
+        self,
+        session: SessionRecord,
+        effective_config: dict[str, object],
+    ) -> str:
+        value = (
+            session.codex_settings.get("model")
+            or self.config.codex_model
+            or effective_config.get("model")
+            or "default"
+        )
+        return str(value)
+
+    def _effective_session_reasoning_effort(
+        self,
+        session: SessionRecord,
+        effective_config: dict[str, object],
+    ) -> str:
+        value = (
+            session.codex_settings.get("reasoning_effort")
+            or effective_config.get("model_reasoning_effort")
+            or effective_config.get("reasoningEffort")
+            or effective_config.get("reasoning_effort")
+            or "default"
+        )
+        return str(value)
+
+    def _effective_session_service_tier(
+        self,
+        session: SessionRecord,
+        effective_config: dict[str, object],
+    ) -> str:
+        value = (
+            session.codex_settings.get("service_tier")
+            or effective_config.get("service_tier")
+            or effective_config.get("serviceTier")
+            or ""
+        )
+        return str(value).strip().lower()
 
     def _handle_codex_debug_config_command(self, incoming: IncomingMessage, args: str) -> None:
         session = self._require_bound_session_or_notify(incoming)

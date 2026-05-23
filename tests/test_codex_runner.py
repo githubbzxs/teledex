@@ -370,6 +370,7 @@ class CodexRunnerTestCase(unittest.TestCase):
             {
                 "model": "gpt-5.4",
                 "reasoning_effort": "high",
+                "service_tier": "fast",
                 "approval_policy": "never",
                 "sandbox_mode": "danger-full-access",
                 "collaboration_mode": "default",
@@ -379,8 +380,104 @@ class CodexRunnerTestCase(unittest.TestCase):
         self.assertIn("cwd=/root/freecodex", message)
         self.assertIn("thread=thread-123", message)
         self.assertIn("model=gpt-5.4", message)
+        self.assertIn("service_tier=fast", message)
         self.assertNotIn("env -i", message)
         self.assertNotIn("GH_TOKEN", message)
+
+    def test_reused_runtime_refreshes_cached_fast_status_line(self) -> None:
+        fake_client = _FakeAppServerClient(
+            {
+                "config/read": {
+                    "config": {
+                        "model": "gpt-5.5",
+                        "model_reasoning_effort": "xhigh",
+                        "tui": {
+                            "status_line": [
+                                "model-with-reasoning",
+                                "fast-mode",
+                                "context-remaining",
+                            ]
+                        },
+                    }
+                }
+            }
+        )
+        runtime = self.runner._ensure_runtime(1, Path(self.temp_dir.name), "tmux-test")
+        with runtime.state_lock:
+            runtime.client = fake_client  # type: ignore[assignment]
+            runtime.bound_thread_id = "thread-123"
+            runtime.status_line_state = {
+                "cwd": Path(self.temp_dir.name),
+                "model": "gpt-5.5",
+                "reasoning_effort": "xhigh",
+                "service_tier": None,
+                "status_line_items": (
+                    "model-with-reasoning",
+                    "fast-mode",
+                    "context-remaining",
+                ),
+                "context_remaining_percent": 87,
+                "last_emitted_line": "",
+            }
+
+        _, thread_id = self.runner._ensure_runtime_binding(
+            runtime,
+            "thread-123",
+            {"service_tier": "fast"},
+        )
+
+        self.assertEqual(thread_id, "thread-123")
+        self.assertEqual(runtime.status_line_state["service_tier"], "fast")
+        self.assertEqual(
+            self.runner._runtime_footer_statusline(runtime),
+            "gpt-test xhigh · Fast on · 87% left",
+        )
+
+    def test_reused_runtime_refreshes_fast_status_line_from_config(self) -> None:
+        fake_client = _FakeAppServerClient(
+            {
+                "config/read": {
+                    "config": {
+                        "model": "gpt-5.5",
+                        "model_reasoning_effort": "xhigh",
+                        "service_tier": "fast",
+                        "tui": {
+                            "status_line": [
+                                "model-with-reasoning",
+                                "fast-mode",
+                                "context-remaining",
+                            ]
+                        },
+                    }
+                }
+            }
+        )
+        runtime = self.runner._ensure_runtime(1, Path(self.temp_dir.name), "tmux-test")
+        with runtime.state_lock:
+            runtime.client = fake_client  # type: ignore[assignment]
+            runtime.bound_thread_id = "thread-123"
+            runtime.status_line_state = {
+                "cwd": Path(self.temp_dir.name),
+                "model": "gpt-5.5",
+                "reasoning_effort": "xhigh",
+                "service_tier": None,
+                "status_line_items": (
+                    "model-with-reasoning",
+                    "fast-mode",
+                    "context-remaining",
+                ),
+                "context_remaining_percent": 91,
+                "last_emitted_line": "",
+            }
+
+        _, thread_id = self.runner._ensure_runtime_binding(runtime, "thread-123", {})
+
+        self.assertEqual(thread_id, "thread-123")
+        self.assertEqual(runtime.status_line_state["service_tier"], "fast")
+        self.assertEqual(
+            self.runner._runtime_footer_statusline(runtime),
+            "gpt-test xhigh · Fast on · 91% left",
+        )
 
     def test_start_thread_uses_app_server_thread_start(self) -> None:
         fake_client = _FakeAppServerClient(
