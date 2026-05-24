@@ -1431,6 +1431,21 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertEqual(prompts, ["重复消息"])
 
+    def test_process_telegram_update_advances_offset_after_handler_error(self) -> None:
+        calls: list[int] = []
+
+        def fake_handle_telegram_update(update: dict) -> None:
+            calls.append(int(update["update_id"]))
+            raise RuntimeError("handler failed")
+
+        self.app._handle_telegram_update = fake_handle_telegram_update  # type: ignore[method-assign]
+
+        self.app._process_telegram_update({"update_id": 42, "message": {"text": "/goal"}})
+
+        self.assertEqual(calls, [42])
+        self.assertEqual(self.app._update_offset, 43)
+        self.assertEqual(self.app.storage.get_telegram_update_offset(), 43)
+
     def test_app_init_recovers_interrupted_runs_and_reads_saved_offset(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "会话")
@@ -1634,6 +1649,57 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("Goal set.", messages[0])
         self.assertIn("Objective: ship release", messages[0])
         self.assertIn("Tokens: 1,200 / 50,000", messages[0])
+
+    def test_handle_codex_command_resets_stale_thread_when_goal_thread_missing(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
+        self.app.storage.update_session_thread_id(session.id, "missing-thread")
+        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
+        messages: list[str] = []
+
+        def fake_set_thread_goal(
+            cwd: Path,
+            thread_id: str,
+            *,
+            objective: str | None = None,
+            status: str | None = None,
+            token_budget: int | None = None,
+        ) -> dict[str, object]:
+            raise RuntimeError("thread/goal/set 失败：thread not found: missing-thread")
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            messages.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=1008,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.set_thread_goal = fake_set_thread_goal  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        self.app._handle_codex_command(
+            IncomingMessage(
+                chat_id=100,
+                user_id=1,
+                text="/goal complete",
+                message_id=132,
+                message_thread_id=9,
+            )
+        )
+
+        updated = self.app.storage.get_session(session.id, 1)
+        assert updated is not None
+        self.assertIsNone(updated.codex_thread_id)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("previous Codex thread is no longer available", messages[0])
 
     def test_handle_codex_goal_command_allows_objective_starting_with_clear(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)

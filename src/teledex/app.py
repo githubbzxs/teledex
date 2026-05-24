@@ -688,10 +688,7 @@ class TeledexApp:
                     timeout_seconds=self.config.poll_timeout_seconds,
                 )
                 for update in updates:
-                    next_offset = int(update["update_id"]) + 1
-                    self._handle_telegram_update(update)
-                    self._update_offset = next_offset
-                    self.storage.set_telegram_update_offset(next_offset)
+                    self._process_telegram_update(update)
             except TelegramRateLimitError as exc:
                 delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
                 self.logger.warning("Telegram 轮询触发限流，%s 秒后重试。", delay)
@@ -702,6 +699,19 @@ class TeledexApp:
             except Exception:
                 self.logger.exception("Telegram 主循环异常")
                 time.sleep(3)
+
+    def _process_telegram_update(self, update: dict) -> None:
+        next_offset = int(update["update_id"]) + 1
+        try:
+            self._handle_telegram_update(update)
+        except Exception:
+            self.logger.exception(
+                "处理 Telegram 更新失败，已跳过：update_id=%s",
+                update.get("update_id"),
+            )
+        finally:
+            self._update_offset = next_offset
+            self.storage.set_telegram_update_offset(next_offset)
 
     def _run_discord_forever(self) -> None:
         if self.discord is None:
@@ -1120,9 +1130,46 @@ class TeledexApp:
         }
         handler = handler_map.get(command)
         if handler is not None:
-            handler(incoming, args)
+            try:
+                handler(incoming, args)
+            except RuntimeError as exc:
+                if self._handle_codex_command_runtime_error(incoming, command, exc):
+                    return
+                raise
             return
         self._handle_unsupported_codex_command(incoming, command)
+
+    def _handle_codex_command_runtime_error(
+        self,
+        incoming: IncomingMessage,
+        command: str,
+        exc: RuntimeError,
+    ) -> bool:
+        if "thread not found" not in str(exc).lower():
+            return False
+
+        session = self.storage.get_active_session(
+            incoming.user_id,
+            incoming.chat_id,
+            incoming.message_thread_id,
+        )
+        if session is not None and session.codex_thread_id:
+            self._reset_session_thread(session.id)
+            session_label = f"session_id={session.id}"
+        else:
+            session_label = "session_id=unknown"
+        self.logger.warning(
+            "Codex 命令引用了不存在的线程，已重置会话：command=%s %s",
+            command,
+            session_label,
+            exc_info=True,
+        )
+        self._safe_send_message(
+            incoming.chat_id,
+            "The previous Codex thread is no longer available. I reset this session. Send the command again to start from a fresh thread.",
+            incoming.message_thread_id,
+        )
+        return True
 
     def _handle_codex_new_command(self, incoming: IncomingMessage, args: str = "") -> None:
         session = self.storage.get_active_session(
