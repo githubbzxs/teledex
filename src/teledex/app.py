@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 from .codex_runner import CodexProcessHandle, CodexRunner
+from .codex_app_server_exec import _is_fast_service_tier
 from .config import AppConfig
 from .discord_api import DiscordApiError, DiscordClient
 from .formatting import (
@@ -1557,7 +1558,7 @@ class TeledexApp:
             return
         effective_config = self._read_effective_codex_config(session)
         current_tier = self._effective_session_service_tier(session, effective_config)
-        current = current_tier == "fast"
+        current = _is_fast_service_tier(current_tier)
         action = args.strip().lower()
         if action in {"", "toggle"}:
             if current and session.codex_settings.get("service_tier") != "fast":
@@ -1763,7 +1764,7 @@ class TeledexApp:
             f"Status: {session.status}",
             f"Model: {self._effective_session_model(session, effective_config)}",
             f"Effort: {self._effective_session_reasoning_effort(session, effective_config)}",
-            f"Fast: {'on' if self._effective_session_service_tier(session, effective_config) == 'fast' else 'off'}",
+            f"Fast: {'on' if _is_fast_service_tier(self._effective_session_service_tier(session, effective_config)) else 'off'}",
             f"Personality: {session.codex_settings.get('personality') or 'default'}",
             f"Approval: {session.codex_settings.get('approval_policy') or 'default'}",
             f"Sandbox: {session.codex_settings.get('sandbox_mode') or 'default'}",

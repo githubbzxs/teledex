@@ -339,6 +339,10 @@ def _extract_service_tier(payload: Any) -> str | None:
     return None
 
 
+def _is_fast_service_tier(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"fast", "priority"}
+
+
 def _extract_status_line_items(payload: Any) -> tuple[str, ...]:
     if not isinstance(payload, dict):
         return _DEFAULT_STATUS_LINE_ITEMS
@@ -404,6 +408,7 @@ def _build_footer_statusline(status_line_state: dict[str, Any]) -> str:
     model = str(status_line_state.get("model") or "").strip() or "loading"
     reasoning_effort = _reasoning_effort_label(status_line_state.get("reasoning_effort"))
     service_tier = str(status_line_state.get("service_tier") or "").strip().lower()
+    fast_enabled = _is_fast_service_tier(service_tier)
     current_dir = _format_directory_display(Path(status_line_state["cwd"]))
     context_remaining = status_line_state.get("context_remaining_percent")
     thread_id = str(status_line_state.get("thread_id") or "").strip()
@@ -413,7 +418,7 @@ def _build_footer_statusline(status_line_state: dict[str, Any]) -> str:
         "model-name": model,
         "model-with-reasoning": (
             f"{model} {reasoning_effort}"
-            f"{' fast' if model == _FAST_STATUS_MODEL and service_tier == 'fast' else ''}"
+            f"{' fast' if model == _FAST_STATUS_MODEL and fast_enabled else ''}"
         ).strip(),
         "current-dir": current_dir,
         "context-remaining": (
@@ -425,7 +430,7 @@ def _build_footer_statusline(status_line_state: dict[str, Any]) -> str:
             else ""
         ),
         "session-id": thread_id,
-        "fast-mode": "Fast on" if service_tier == "fast" else "Fast off",
+        "fast-mode": "Fast on" if fast_enabled else "Fast off",
     }
     segments = [
         value_by_item.get(str(item).strip(), "")

@@ -54,6 +54,25 @@ class CodexAppServerExecTestCase(unittest.TestCase):
 
         self.assertEqual(line, "gpt-5.4 xhigh fast · 82% left")
 
+    def test_build_footer_statusline_treats_priority_as_fast(self) -> None:
+        line = _build_footer_statusline(
+            {
+                "cwd": Path("/root/teledex"),
+                "model": "gpt-5.5",
+                "reasoning_effort": "xhigh",
+                "service_tier": "priority",
+                "status_line_items": (
+                    "model-with-reasoning",
+                    "fast-mode",
+                    "context-remaining",
+                ),
+                "context_remaining_percent": 100,
+                "thread_id": "thread-1",
+            }
+        )
+
+        self.assertEqual(line, "gpt-5.5 xhigh · Fast on · 100% left")
+
     def test_build_footer_statusline_defaults_to_codex_default_items(self) -> None:
         line = _build_footer_statusline(
             {
