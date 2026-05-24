@@ -1311,15 +1311,8 @@ class TeledexApp:
         )
 
     def _handle_codex_goal_command(self, incoming: IncomingMessage, args: str) -> None:
-        session = self._require_bound_session_or_notify(incoming)
-        if session is None:
-            return
-        if self._is_session_running(session.id):
-            self._safe_send_message(
-                incoming.chat_id,
-                f"Session #{session.id} is running. /goal is unavailable until it finishes, or stop it first with /stop.",
-                incoming.message_thread_id,
-            )
+        if not self._goal_args_look_like_management(args):
+            self._handle_prompt(incoming)
             return
 
         try:
@@ -1332,6 +1325,18 @@ class TeledexApp:
             )
             return
         action_head = action_text.split(maxsplit=1)[0].lower() if action_text else ""
+
+        session = self._require_bound_session_or_notify(incoming)
+        if session is None:
+            return
+        if self._is_session_running(session.id):
+            self._safe_send_message(
+                incoming.chat_id,
+                f"Session #{session.id} is running. /goal management is unavailable until it finishes, or stop it first with /stop.",
+                incoming.message_thread_id,
+            )
+            return
+
         cwd = Path(session.bound_path)
 
         if action_head in _GOAL_CLEAR_ACTIONS and action_text == action_head:
@@ -1429,6 +1434,28 @@ class TeledexApp:
             self._format_goal_update("Goal set.", goal),
             incoming.message_thread_id,
         )
+
+    def _goal_args_look_like_management(
+        self,
+        raw_args: str,
+    ) -> bool:
+        text = raw_args.strip()
+        if not text:
+            return True
+        parts = text.split(maxsplit=1)
+        action_head = parts[0].lower()
+        tail = parts[1].strip() if len(parts) > 1 else ""
+        if action_head.startswith("--"):
+            return bool(_GOAL_BUDGET_PATTERN.match(text))
+        if not tail:
+            return (
+                action_head in _GOAL_SHOW_ACTIONS
+                or action_head in _GOAL_CLEAR_ACTIONS
+                or self._normalize_goal_status_action(action_head) is not None
+            )
+        if self._normalize_goal_status_action(action_head) is None:
+            return False
+        return bool(_GOAL_BUDGET_PATTERN.match(" " + tail))
 
     def _handle_codex_rename_command(self, incoming: IncomingMessage, args: str) -> None:
         session = self._require_bound_session_or_notify(incoming)
