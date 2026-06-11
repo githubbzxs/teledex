@@ -136,7 +136,7 @@ The repository ships with a ready-to-copy `.env.example`. Core variables:
 ## Telegram Commands
 
 - `/start`: show help text
-- `/bind <absolute-path>`: bind the working directory and start the persistent tmux terminal; it creates the session on first bind and reuses it on later binds
+- `/bind <absolute-path>`: bind the working directory for the current chat or topic and start its own persistent tmux terminal; later binds in the same chat or topic reuse that topic-scoped session
 - `/stop`: stop the current task
 
 All other `/commands` are forwarded directly into the active Codex session.
@@ -145,9 +145,9 @@ Plain text messages are sent to the current active session and executed inside i
 
 ## Runtime Model
 
-- Each authorized user keeps an active session pointer
+- Each authorized user keeps active sessions scoped by chat and topic
 - Each session can be bound to a real project directory
-- Binding a directory starts a persistent `tmux` terminal for that session
+- Binding a directory starts a persistent `tmux` terminal for that session; different topics get separate sessions even when they bind the same directory
 - The first run creates a Codex thread, and later messages try to reuse it inside the same terminal context
 - One Telegram preview message is refreshed continuously while the task runs
 - Final output and run status are written back after completion

@@ -33,7 +33,7 @@ from .telegram_api import (
 
 HELP_TEXT = """teledex commands:
 /start - Show help
-/bind <absolute-path> - Bind a directory; creates a session if needed or switches to the existing bound session
+/bind <absolute-path> - Bind a directory to this topic with its own persistent CLI session
 /stop - Stop the current task
 
 Other slash commands are forwarded to the active Codex session as native Codex commands.
@@ -63,6 +63,9 @@ _LOCAL_COMMANDS = {
     "/help",
     "/bind",
     "/stop",
+}
+_REMOVED_CODEX_COMMANDS = {
+    "/fast": "Telegram /fast has been removed. Fast now follows the active Codex configuration and runtime state.",
 }
 _LEGACY_LOCAL_COMMANDS = {
     "/tnew",
@@ -96,7 +99,6 @@ _MIRRORED_CODEX_COMMANDS = {
     "/diff",
     "/exit",
     "/experimental",
-    "/fast",
     "/feedback",
     "/fork",
     "/goal",
@@ -603,6 +605,9 @@ class TeledexApp:
     def _is_local_command(self, text: str) -> bool:
         return self._extract_command(text) in (_LOCAL_COMMANDS | _LEGACY_LOCAL_COMMANDS)
 
+    def _is_removed_codex_command(self, text: str) -> bool:
+        return self._extract_command(text) in _REMOVED_CODEX_COMMANDS
+
     def _is_mirrored_codex_command(self, text: str) -> bool:
         return self._extract_command(text) in _MIRRORED_CODEX_COMMANDS
 
@@ -929,6 +934,8 @@ class TeledexApp:
                 self._handle_prompt(self._normalize_incoming_message(incoming))
             elif incoming.text.startswith("/") and self._is_local_command(incoming.text):
                 self._handle_command(incoming)
+            elif incoming.text.startswith("/") and self._is_removed_codex_command(incoming.text):
+                self._handle_removed_codex_command(incoming)
             elif incoming.text.startswith("/") and self._is_mirrored_codex_command(incoming.text):
                 self._handle_codex_command(incoming)
             else:
@@ -1006,23 +1013,21 @@ class TeledexApp:
                 incoming.message_thread_id,
             )
             normalized_path = str(bound_path)
-            target_session = self.storage.get_session_by_bound_path(
-                incoming.user_id,
-                normalized_path,
-            )
             created_new_session = False
-            if target_session is None:
-                if active_session is None or (
-                    active_session.bound_path is not None
-                    and active_session.bound_path != normalized_path
-                ):
-                    target_session = self.storage.create_session(
-                        incoming.user_id,
-                        _session_title_from_path(bound_path),
-                    )
-                    created_new_session = True
-                else:
-                    target_session = active_session
+            should_bind_session = False
+            if active_session is not None and (
+                active_session.bound_path is None or active_session.bound_path == normalized_path
+            ):
+                target_session = active_session
+                should_bind_session = active_session.bound_path != normalized_path
+            else:
+                target_session = self.storage.create_session(
+                    incoming.user_id,
+                    _session_title_from_path(bound_path),
+                )
+                created_new_session = True
+                should_bind_session = True
+            if should_bind_session:
                 self.storage.bind_session_path(
                     target_session.id,
                     incoming.user_id,
@@ -1096,6 +1101,14 @@ class TeledexApp:
             incoming.message_thread_id,
         )
 
+    def _handle_removed_codex_command(self, incoming: IncomingMessage) -> None:
+        command = self._extract_command(incoming.text)
+        self._safe_send_message(
+            incoming.chat_id,
+            _REMOVED_CODEX_COMMANDS.get(command, "This Telegram command has been removed."),
+            incoming.message_thread_id,
+        )
+
     def _handle_codex_command(self, incoming: IncomingMessage) -> None:
         command_text = incoming.text.split()[0]
         command = self._extract_command(incoming.text)
@@ -1111,7 +1124,6 @@ class TeledexApp:
             "/init": self._handle_codex_init_command,
             "/review": self._handle_codex_review_command,
             "/model": self._handle_codex_model_command,
-            "/fast": self._handle_codex_fast_command,
             "/personality": self._handle_codex_personality_command,
             "/approvals": self._handle_codex_approvals_command,
             "/permissions": self._handle_codex_permissions_command,
@@ -1579,52 +1591,6 @@ class TeledexApp:
             self._format_model_status_message(model, effort),
         )
 
-    def _handle_codex_fast_command(self, incoming: IncomingMessage, args: str) -> None:
-        session = self._require_bound_session_or_notify(incoming)
-        if session is None:
-            return
-        effective_config = self._read_effective_codex_config(session)
-        current_tier = self._effective_session_service_tier(session, effective_config)
-        current = _is_fast_service_tier(current_tier)
-        action = args.strip().lower()
-        if action in {"", "toggle"}:
-            if current and session.codex_settings.get("service_tier") != "fast":
-                self._safe_send_message(
-                    incoming.chat_id,
-                    "Fast mode is enabled by the Codex default configuration. /fast off only clears the session override.",
-                    incoming.message_thread_id,
-                )
-                return
-            enabled = not current
-        elif action == "status":
-            self._safe_send_message(
-                incoming.chat_id,
-                f"Fast mode is currently: {'on' if current else 'off'}",
-                incoming.message_thread_id,
-            )
-            return
-        elif action == "on":
-            enabled = True
-        elif action == "off":
-            enabled = False
-        else:
-            self._safe_send_message(
-                incoming.chat_id,
-                "Usage: /fast [on|off|status]",
-                incoming.message_thread_id,
-            )
-            return
-        self._apply_session_codex_settings(
-            incoming,
-            session,
-            {"service_tier": "fast" if enabled else None},
-            (
-                "Fast mode override set to: on"
-                if enabled
-                else "Fast mode override cleared. The session now follows the Codex default."
-            ),
-        )
-
     def _handle_codex_personality_command(self, incoming: IncomingMessage, args: str) -> None:
         session = self._require_bound_session_or_notify(incoming)
         if session is None:
@@ -1843,8 +1809,7 @@ class TeledexApp:
         effective_config: dict[str, object],
     ) -> str:
         value = (
-            session.codex_settings.get("service_tier")
-            or effective_config.get("service_tier")
+            effective_config.get("service_tier")
             or effective_config.get("serviceTier")
             or ""
         )

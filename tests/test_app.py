@@ -1133,6 +1133,54 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(active.id, sessions[1].id)
         self.assertIn(f"Created session #{sessions[1].id}", calls[0])
 
+    def test_bind_creates_topic_scoped_session_for_same_directory(self) -> None:
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
+        self.app.storage.ensure_user(1, chat_id=100, message_thread_id=10)
+        calls: list[str] = []
+
+        def fake_send_message(
+            chat_id: int,
+            text: str,
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            parse_mode: str | None = None,
+        ) -> TelegramMessage:
+            calls.append(text)
+            return TelegramMessage(
+                chat_id=chat_id,
+                message_id=334,
+                message_thread_id=message_thread_id,
+            )
+
+        self.app.runner.reset_terminal = lambda session_id, cwd=None: None  # type: ignore[method-assign]
+        self.app.runner.ensure_terminal = lambda session_id, cwd: f"teledex-{session_id}"  # type: ignore[method-assign]
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+
+        for message_thread_id in (9, 10):
+            self.app._handle_command(
+                IncomingMessage(
+                    chat_id=100,
+                    user_id=1,
+                    text=f"/bind {self.temp_dir.name}",
+                    message_id=message_thread_id,
+                    message_thread_id=message_thread_id,
+                )
+            )
+
+        sessions = self.app.storage.list_sessions(1)
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual({session.bound_path for session in sessions}, {self.temp_dir.name})
+        active_a = self.app.storage.get_active_session(1, chat_id=100, message_thread_id=9)
+        active_b = self.app.storage.get_active_session(1, chat_id=100, message_thread_id=10)
+        self.assertIsNotNone(active_a)
+        self.assertIsNotNone(active_b)
+        assert active_a is not None
+        assert active_b is not None
+        self.assertNotEqual(active_a.id, active_b.id)
+        self.assertEqual(len(calls), 2)
+        self.assertIn(f"Created session #{active_a.id}", calls[0])
+        self.assertIn(f"Created session #{active_b.id}", calls[1])
+
     def test_sync_bot_commands_registers_management_commands(self) -> None:
         commands: list[tuple[tuple[str, str], ...]] = []
 
@@ -2039,15 +2087,23 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertIn("Effort: xhigh", messages[0])
         self.assertIn("Fast: on", messages[0])
 
-    def test_handle_codex_fast_status_uses_effective_codex_config(self) -> None:
+    def test_handle_codex_status_ignores_legacy_session_fast_override(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
         session = self.app.storage.create_session(1, "teledex")
+        self.app.storage.update_session_codex_settings(
+            session.id,
+            {"service_tier": "fast"},
+        )
         self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
         self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
         messages: list[str] = []
 
         self.app.runner.read_config = lambda cwd: {  # type: ignore[method-assign]
-            "config": {"service_tier": "fast"}
+            "config": {
+                "model": "gpt-5.5",
+                "model_reasoning_effort": "xhigh",
+                "service_tier": "flex",
+            }
         }
 
         def fake_send_message(
@@ -2070,24 +2126,19 @@ class AppMessagingTestCase(unittest.TestCase):
             IncomingMessage(
                 chat_id=100,
                 user_id=1,
-                text="/fast status",
+                text="/status",
                 message_id=141,
                 message_thread_id=9,
             )
         )
 
-        self.assertEqual(messages, ["Fast mode is currently: on"])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Fast: off", messages[0])
 
-    def test_handle_codex_fast_status_treats_priority_as_fast(self) -> None:
+    def test_handle_removed_fast_command_does_not_start_prompt(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)
-        session = self.app.storage.create_session(1, "teledex")
-        self.app.storage.bind_session_path(session.id, 1, self.temp_dir.name)
-        self.app.storage.set_active_session(1, session.id, chat_id=100, message_thread_id=9)
         messages: list[str] = []
-
-        self.app.runner.read_config = lambda cwd: {  # type: ignore[method-assign]
-            "config": {"service_tier": "priority"}
-        }
+        prompts: list[str] = []
 
         def fake_send_message(
             chat_id: int,
@@ -2103,19 +2154,30 @@ class AppMessagingTestCase(unittest.TestCase):
                 message_thread_id=message_thread_id,
             )
 
-        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        def fake_handle_prompt(incoming: IncomingMessage) -> None:
+            prompts.append(incoming.text)
 
-        self.app._handle_codex_command(
+        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._handle_prompt = fake_handle_prompt  # type: ignore[method-assign]
+
+        self.app._handle_incoming_message(
             IncomingMessage(
                 chat_id=100,
                 user_id=1,
                 text="/fast status",
                 message_id=142,
                 message_thread_id=9,
-            )
+            ),
+            update_id=200,
         )
 
-        self.assertEqual(messages, ["Fast mode is currently: on"])
+        self.assertEqual(
+            messages,
+            [
+                "Telegram /fast has been removed. Fast now follows the active Codex configuration and runtime state."
+            ],
+        )
+        self.assertEqual(prompts, [])
 
     def test_legacy_twipe_command_does_not_clear_user_state(self) -> None:
         self.app.storage.ensure_user(1, chat_id=100, message_thread_id=9)

@@ -108,7 +108,6 @@ class StorageTestCase(unittest.TestCase):
             {
                 "model": "gpt-5.4",
                 "reasoning_effort": "high",
-                "service_tier": "fast",
             },
         )
         self.assertIsNotNone(fetched)

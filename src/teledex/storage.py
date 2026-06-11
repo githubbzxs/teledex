@@ -665,7 +665,7 @@ class Storage:
             )
             for key, value in updates.items():
                 normalized_key = str(key).strip()
-                if not normalized_key:
+                if not normalized_key or normalized_key == "service_tier":
                     continue
                 if value is None:
                     current_settings.pop(normalized_key, None)
@@ -883,4 +883,10 @@ class Storage:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(key): value
+            for key, value in payload.items()
+            if str(key).strip() and str(key).strip() != "service_tier"
+        }
