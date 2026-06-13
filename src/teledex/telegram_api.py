@@ -75,6 +75,35 @@ class TelegramClient:
             ),
         )
 
+    def send_rich_message(
+        self,
+        chat_id: int,
+        rich_message: dict[str, Any],
+        message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> TelegramMessage:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "rich_message": json.dumps(rich_message, ensure_ascii=False),
+        }
+        if message_thread_id is not None:
+            payload["message_thread_id"] = message_thread_id
+        if reply_to_message_id is not None:
+            payload["reply_parameters"] = json.dumps(
+                {"message_id": reply_to_message_id},
+                ensure_ascii=False,
+            )
+        result = self._call("sendRichMessage", payload)
+        return TelegramMessage(
+            chat_id=int(result["chat"]["id"]),
+            message_id=int(result["message_id"]),
+            message_thread_id=(
+                int(result["message_thread_id"])
+                if result.get("message_thread_id") is not None
+                else None
+            ),
+        )
+
     def edit_message_text(
         self,
         chat_id: int,

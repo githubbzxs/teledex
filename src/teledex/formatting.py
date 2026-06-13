@@ -183,6 +183,33 @@ def markdown_to_telegram_html(
     return html_text or html.escape(normalized)
 
 
+def prepare_rich_markdown(
+    text: str,
+    local_link_resolver: Callable[[str], str | None] | None = None,
+) -> str:
+    normalized = strip_citations(text).replace("\r\n", "\n").strip()
+    if not normalized:
+        return ""
+
+    lines: list[str] = []
+    in_code_block = False
+    for line in normalized.split("\n"):
+        if line.startswith("```"):
+            lines.append(line)
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            lines.append(line)
+            continue
+        lines.append(
+            _rewrite_rich_markdown_links(
+                _auto_bold_leading_labels(line),
+                local_link_resolver,
+            )
+        )
+    return "\n".join(lines).strip()
+
+
 def _collect_markdown_blocks(text: str) -> list[str]:
     blocks: list[str] = []
     current: list[str] = []
@@ -347,6 +374,30 @@ def _render_markdown_link(
         if resolved_target:
             return f'<a href="{html.escape(resolved_target, quote=True)}">{label}</a>'
     return f"{label} <code>{html.escape(target)}</code>"
+
+
+def _rewrite_rich_markdown_links(
+    text: str,
+    local_link_resolver: Callable[[str], str | None] | None = None,
+) -> str:
+    def replace_link(match: re.Match[str]) -> str:
+        label = match.group(1)
+        target = match.group(2).strip()
+        if _is_supported_rich_markdown_link(target):
+            return match.group(0)
+        if local_link_resolver is not None:
+            resolved_target = local_link_resolver(target)
+            if resolved_target:
+                return f"[{label}]({resolved_target})"
+        safe_target = target.replace("`", "'")
+        return f"{label} `{safe_target}`"
+
+    return _LINK_PATTERN.sub(replace_link, text)
+
+
+def _is_supported_rich_markdown_link(target: str) -> bool:
+    normalized = target.strip().lower()
+    return normalized.startswith(("http://", "https://", "mailto:", "tel:", "tg://", "#"))
 
 
 def _auto_bold_leading_labels(text: str) -> str:

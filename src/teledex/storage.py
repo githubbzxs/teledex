@@ -64,6 +64,7 @@ class PendingTelegramMessage:
     reply_to_message_id: int | None
     text: str
     parse_mode: str | None
+    rich_message_json: str | None
     due_at: str
     created_at: str
     updated_at: str
@@ -156,6 +157,7 @@ class Storage:
                     reply_to_message_id INTEGER,
                     text TEXT NOT NULL,
                     parse_mode TEXT,
+                    rich_message_json TEXT,
                     due_at TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -179,6 +181,10 @@ class Storage:
             if "user_id" not in pending_message_columns:
                 self._conn.execute(
                     "ALTER TABLE pending_telegram_messages ADD COLUMN user_id INTEGER"
+                )
+            if "rich_message_json" not in pending_message_columns:
+                self._conn.execute(
+                    "ALTER TABLE pending_telegram_messages ADD COLUMN rich_message_json TEXT"
                 )
             existing_rows = self._conn.execute(
                 "SELECT id, bound_path FROM sessions WHERE bound_path IS NOT NULL AND TRIM(bound_path) != ''"
@@ -281,6 +287,7 @@ class Storage:
         reply_to_message_id: int | None,
         parse_mode: str | None,
         due_at: str,
+        rich_message_json: str | None = None,
     ) -> int:
         now = _utc_now()
         with self._lock:
@@ -293,10 +300,11 @@ class Storage:
                     reply_to_message_id,
                     text,
                     parse_mode,
+                    rich_message_json,
                     due_at,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -305,6 +313,7 @@ class Storage:
                     reply_to_message_id,
                     text,
                     parse_mode,
+                    rich_message_json,
                     due_at,
                     now,
                     now,
@@ -323,7 +332,7 @@ class Storage:
             rows = self._conn.execute(
                 """
                 SELECT id, user_id, chat_id, message_thread_id, reply_to_message_id,
-                       text, parse_mode, due_at, created_at, updated_at
+                       text, parse_mode, rich_message_json, due_at, created_at, updated_at
                 FROM pending_telegram_messages
                 WHERE due_at <= ?
                 ORDER BY due_at ASC, id ASC
@@ -873,6 +882,9 @@ class Storage:
             ),
             text=str(row["text"]),
             parse_mode=str(row["parse_mode"]) if row["parse_mode"] else None,
+            rich_message_json=(
+                str(row["rich_message_json"]) if row["rich_message_json"] else None
+            ),
             due_at=str(row["due_at"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),

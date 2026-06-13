@@ -5,6 +5,7 @@ import unittest
 from teledex.formatting import (
     extract_first_bold_markdown,
     markdown_to_telegram_html,
+    prepare_rich_markdown,
     split_markdown_message,
 )
 
@@ -71,6 +72,31 @@ class FormattingTestCase(unittest.TestCase):
             '<a href="https://github.com/example/megaverse_lab/blob/main/src/megaverse_lab/cli.py#L11">cli.py:11</a>',
             html,
         )
+
+    def test_prepare_rich_markdown_rewrites_local_file_links(self) -> None:
+        markdown = (
+            "验证：[cli.py:11](/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11)\n\n"
+            "```python\n"
+            "[not-a-link](/root/test/file.py)\n"
+            "```"
+        )
+
+        rich_markdown = prepare_rich_markdown(
+            markdown,
+            local_link_resolver=lambda target: (
+                "https://github.com/example/megaverse_lab/blob/main/src/megaverse_lab/cli.py#L11"
+                if target == "/root/test/megaverse_lab/src/megaverse_lab/cli.py#L11"
+                else None
+            ),
+        )
+
+        self.assertIn(
+            "[cli.py:11]"
+            "(https://github.com/example/megaverse_lab/blob/main/src/megaverse_lab/cli.py#L11)",
+            rich_markdown,
+        )
+        self.assertIn("**验证：**", rich_markdown)
+        self.assertIn("[not-a-link](/root/test/file.py)", rich_markdown)
 
     def test_split_markdown_message_keeps_code_blocks_renderable(self) -> None:
         code_lines = "\n".join(f"print({index})" for index in range(40))

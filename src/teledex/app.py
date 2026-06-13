@@ -19,6 +19,7 @@ from .config import AppConfig
 from .discord_api import DiscordApiError, DiscordClient
 from .formatting import (
     markdown_to_telegram_html,
+    prepare_rich_markdown,
     split_markdown_message,
 )
 from .storage import PendingTelegramMessage, SessionRecord, Storage
@@ -53,6 +54,7 @@ _COLLABORATION_WATCH_POLL_INTERVAL_SECONDS = 0.2
 _PENDING_MESSAGE_IDLE_SLEEP_SECONDS = 2.0
 _PENDING_MESSAGE_MAX_SLEEP_SECONDS = 30.0
 _PENDING_MESSAGE_BATCH_SIZE = 20
+_TELEGRAM_RICH_MESSAGE_MAX_CHARS = 32000
 _BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "Show help"),
     ("bind", "Bind directory"),
@@ -771,6 +773,7 @@ class TeledexApp:
         message_thread_id: int | None,
         reply_to_message_id: int | None = None,
         parse_mode: str | None = None,
+        rich_message: dict[str, object] | None = None,
     ) -> None:
         delay = self._telegram_rate_limit_remaining_seconds()
         due_at = _utc_after_delay_iso(delay)
@@ -782,6 +785,11 @@ class TeledexApp:
             reply_to_message_id=reply_to_message_id,
             parse_mode=parse_mode,
             due_at=due_at,
+            rich_message_json=(
+                json.dumps(rich_message, ensure_ascii=False)
+                if rich_message is not None
+                else None
+            ),
         )
         self.logger.warning(
             "Telegram 消息已加入延迟发送队列：id=%s due_at=%s",
@@ -833,13 +841,40 @@ class TeledexApp:
     def _deliver_pending_telegram_message(self, pending_message: PendingTelegramMessage) -> None:
         try:
             assert self.telegram is not None
-            self.telegram.send_message(
-                chat_id=pending_message.chat_id,
-                text=pending_message.text,
-                message_thread_id=pending_message.message_thread_id,
-                reply_to_message_id=pending_message.reply_to_message_id,
-                parse_mode=pending_message.parse_mode,
-            )
+            if pending_message.rich_message_json:
+                try:
+                    rich_message = json.loads(pending_message.rich_message_json)
+                    if not isinstance(rich_message, dict):
+                        raise ValueError("rich_message 不是 JSON 对象")
+                    self.telegram.send_rich_message(
+                        chat_id=pending_message.chat_id,
+                        rich_message=rich_message,
+                        message_thread_id=pending_message.message_thread_id,
+                        reply_to_message_id=pending_message.reply_to_message_id,
+                    )
+                except TelegramRateLimitError:
+                    raise
+                except (TelegramApiError, ValueError, json.JSONDecodeError):
+                    self.logger.warning(
+                        "Telegram Rich 延迟消息发送失败，改用普通消息：id=%s",
+                        pending_message.id,
+                        exc_info=True,
+                    )
+                    self.telegram.send_message(
+                        chat_id=pending_message.chat_id,
+                        text=pending_message.text,
+                        message_thread_id=pending_message.message_thread_id,
+                        reply_to_message_id=pending_message.reply_to_message_id,
+                        parse_mode=pending_message.parse_mode,
+                    )
+            else:
+                self.telegram.send_message(
+                    chat_id=pending_message.chat_id,
+                    text=pending_message.text,
+                    message_thread_id=pending_message.message_thread_id,
+                    reply_to_message_id=pending_message.reply_to_message_id,
+                    parse_mode=pending_message.parse_mode,
+                )
             self.storage.delete_pending_telegram_message(pending_message.id)
             self.logger.info("Telegram 延迟消息发送成功：id=%s", pending_message.id)
         except TelegramRateLimitError as exc:
@@ -2873,26 +2908,7 @@ class TeledexApp:
             )
             return
         final_text = text.strip() or "Completed, but there was no final reply to display."
-        final_html = self._render_telegram_html(final_text, session_id=active_run.session_id)
-        if final_html and len(final_html) <= 3500:
-            self._safe_send_message(
-                active_run.chat_id,
-                final_html,
-                active_run.message_thread_id,
-                parse_mode="HTML",
-                defer_on_rate_limit=True,
-                user_id=active_run.user_id,
-            )
-            return
-        self._send_long_message(
-            chat_id=active_run.chat_id,
-            text=final_text,
-            message_thread_id=active_run.message_thread_id,
-            prefer_html=True,
-            user_id=active_run.user_id,
-            platform=active_run.platform,
-            telegram_html_session_id=active_run.session_id,
-        )
+        self._send_telegram_final_result(active_run, final_text)
 
     def _build_final_result_message(
         self,
@@ -2916,6 +2932,59 @@ class TeledexApp:
         if session_id is not None:
             resolver = lambda target: self._resolve_local_file_link_for_session(session_id, target)
         return markdown_to_telegram_html(text, local_link_resolver=resolver)
+
+    def _render_telegram_rich_markdown(self, text: str, session_id: int | None = None) -> str:
+        resolver = None
+        if session_id is not None:
+            resolver = lambda target: self._resolve_local_file_link_for_session(session_id, target)
+        return prepare_rich_markdown(text, local_link_resolver=resolver)
+
+    def _send_telegram_final_result(self, active_run: ActiveRun, final_text: str) -> None:
+        parts = split_markdown_message(final_text, _TELEGRAM_RICH_MESSAGE_MAX_CHARS)
+        for part in parts:
+            rich_markdown = self._render_telegram_rich_markdown(
+                part,
+                session_id=active_run.session_id,
+            )
+            fallback_html = self._render_telegram_html(part, session_id=active_run.session_id)
+            if rich_markdown and self._safe_send_rich_message(
+                chat_id=active_run.chat_id,
+                rich_message={"markdown": rich_markdown},
+                message_thread_id=active_run.message_thread_id,
+                fallback_text=fallback_html or part,
+                fallback_parse_mode="HTML" if fallback_html else None,
+                defer_on_rate_limit=True,
+                user_id=active_run.user_id,
+            ):
+                continue
+            if fallback_html:
+                if len(fallback_html) > 3500:
+                    self._send_long_message(
+                        chat_id=active_run.chat_id,
+                        text=part,
+                        message_thread_id=active_run.message_thread_id,
+                        prefer_html=True,
+                        user_id=active_run.user_id,
+                        platform=active_run.platform,
+                        telegram_html_session_id=active_run.session_id,
+                    )
+                    continue
+                self._safe_send_message(
+                    active_run.chat_id,
+                    fallback_html,
+                    active_run.message_thread_id,
+                    parse_mode="HTML",
+                    defer_on_rate_limit=True,
+                    user_id=active_run.user_id,
+                )
+                continue
+            self._safe_send_message(
+                active_run.chat_id,
+                part,
+                active_run.message_thread_id,
+                defer_on_rate_limit=True,
+                user_id=active_run.user_id,
+            )
 
     def _resolve_local_file_link_for_session(self, session_id: int, target: str) -> str | None:
         session = self.storage.get_session(session_id)
@@ -3251,6 +3320,59 @@ class TeledexApp:
         except TelegramApiError:
             self.logger.exception("发送 Telegram 消息失败")
             return None
+
+    def _safe_send_rich_message(
+        self,
+        chat_id: int,
+        rich_message: dict[str, object],
+        message_thread_id: int | None,
+        reply_to_message_id: int | None = None,
+        fallback_text: str = "",
+        fallback_parse_mode: str | None = None,
+        defer_on_rate_limit: bool = False,
+        user_id: int | None = None,
+    ) -> bool:
+        if self.telegram is None:
+            return False
+        if self._telegram_rate_limit_remaining_seconds() > 0:
+            if defer_on_rate_limit:
+                self._schedule_delayed_message_send(
+                    user_id,
+                    chat_id,
+                    fallback_text,
+                    message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
+                    parse_mode=fallback_parse_mode,
+                    rich_message=rich_message,
+                )
+                return True
+            return False
+        try:
+            self.telegram.send_rich_message(
+                chat_id=chat_id,
+                rich_message=rich_message,
+                message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+            )
+            return True
+        except TelegramRateLimitError as exc:
+            delay = self._remember_telegram_rate_limit(exc.retry_after_seconds)
+            self.logger.warning("Telegram Rich 消息发送触发限流，%s 秒内暂停发送。", delay)
+            if defer_on_rate_limit:
+                self._schedule_delayed_message_send(
+                    user_id,
+                    chat_id,
+                    fallback_text,
+                    message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
+                    parse_mode=fallback_parse_mode,
+                    rich_message=rich_message,
+                )
+                return True
+            return False
+        except TelegramApiError:
+            self.logger.warning("发送 Telegram Rich 消息失败，将降级为普通消息。", exc_info=True)
+            return False
 
     def _send_long_message(
         self,

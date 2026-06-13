@@ -164,6 +164,7 @@ class StorageTestCase(unittest.TestCase):
             reply_to_message_id=88,
             parse_mode="HTML",
             due_at=due_at,
+            rich_message_json='{"markdown":"**待发送消息**"}',
         )
 
         due_messages = self.storage.list_due_pending_telegram_messages(
@@ -176,6 +177,10 @@ class StorageTestCase(unittest.TestCase):
         self.assertEqual(due_messages[0].user_id, 1)
         self.assertEqual(due_messages[0].message_thread_id, 9)
         self.assertEqual(due_messages[0].reply_to_message_id, 88)
+        self.assertEqual(
+            due_messages[0].rich_message_json,
+            '{"markdown":"**待发送消息**"}',
+        )
         self.assertEqual(self.storage.get_next_pending_telegram_message_due_at(), due_at)
 
         rescheduled_due_at = "2026-04-04T14:00:00+00:00"

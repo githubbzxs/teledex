@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -223,39 +224,36 @@ class AppMessagingTestCase(unittest.TestCase):
                 }
             )
 
-        def fake_send_message(
+        def fake_send_rich_message(
             chat_id: int,
-            text: str,
+            rich_message: dict[str, object],
             message_thread_id: int | None,
             reply_to_message_id: int | None = None,
-            parse_mode: str | None = None,
+            fallback_text: str = "",
+            fallback_parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
             user_id: int | None = None,
-        ) -> TelegramMessage:
+        ) -> bool:
             sent.append(
                 {
                     "chat_id": chat_id,
-                    "text": text,
+                    "rich_message": rich_message,
                     "message_thread_id": message_thread_id,
                     "reply_to_message_id": reply_to_message_id,
-                    "parse_mode": parse_mode,
+                    "fallback_parse_mode": fallback_parse_mode,
                 }
             )
-            return TelegramMessage(
-                chat_id=chat_id,
-                message_id=789,
-                message_thread_id=message_thread_id,
-            )
+            return True
 
         self.app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
-        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._safe_send_rich_message = fake_send_rich_message  # type: ignore[method-assign]
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(deleted, [{"chat_id": 100, "message_id": 456}])
         self.assertEqual(active_run.preview_message_id, None)
         self.assertEqual(len(sent), 1)
-        self.assertIn("最终回复", str(sent[0]["text"]))
-        self.assertEqual(sent[0]["parse_mode"], "HTML")
+        self.assertIn("最终回复", str(sent[0]["rich_message"]))
+        self.assertEqual(sent[0]["fallback_parse_mode"], "HTML")
         self.assertIsNone(sent[0]["reply_to_message_id"])
 
     def test_send_run_result_ignores_preview_state_footer_and_only_sends_final_message(self) -> None:
@@ -274,37 +272,34 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.app.telegram.delete_message = lambda **kwargs: None  # type: ignore[method-assign]
 
-        def fake_send_message(
+        def fake_send_rich_message(
             chat_id: int,
-            text: str,
+            rich_message: dict[str, object],
             message_thread_id: int | None,
             reply_to_message_id: int | None = None,
-            parse_mode: str | None = None,
+            fallback_text: str = "",
+            fallback_parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
             user_id: int | None = None,
-        ) -> TelegramMessage:
+        ) -> bool:
             sent.append(
                 {
                     "chat_id": chat_id,
-                    "text": text,
+                    "rich_message": rich_message,
                     "message_thread_id": message_thread_id,
-                    "parse_mode": parse_mode,
+                    "fallback_parse_mode": fallback_parse_mode,
                 }
             )
-            return TelegramMessage(
-                chat_id=chat_id,
-                message_id=789,
-                message_thread_id=message_thread_id,
-            )
+            return True
 
-        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._safe_send_rich_message = fake_send_rich_message  # type: ignore[method-assign]
         self.app._send_run_result(active_run, "最终回复", preview)
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("最终回复", str(sent[0]["text"]))
-        self.assertNotIn("Completed", str(sent[0]["text"]))
-        self.assertNotIn("gpt-5.4 default · 98% left · ~/teledex", str(sent[0]["text"]))
-        self.assertEqual(sent[0]["parse_mode"], "HTML")
+        self.assertIn("最终回复", str(sent[0]["rich_message"]))
+        self.assertNotIn("Completed", str(sent[0]["rich_message"]))
+        self.assertNotIn("gpt-5.4 default · 98% left · ~/teledex", str(sent[0]["rich_message"]))
+        self.assertEqual(sent[0]["fallback_parse_mode"], "HTML")
 
     def test_send_run_result_still_sends_final_message_when_preview_delete_fails(self) -> None:
         active_run = ActiveRun(
@@ -321,37 +316,34 @@ class AppMessagingTestCase(unittest.TestCase):
         def fake_delete_message(**kwargs) -> None:
             raise TelegramApiError("删除失败")
 
-        def fake_send_message(
+        def fake_send_rich_message(
             chat_id: int,
-            text: str,
+            rich_message: dict[str, object],
             message_thread_id: int | None,
             reply_to_message_id: int | None = None,
-            parse_mode: str | None = None,
+            fallback_text: str = "",
+            fallback_parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
             user_id: int | None = None,
-        ) -> TelegramMessage:
+        ) -> bool:
             sent.append(
                 {
                     "chat_id": chat_id,
-                    "text": text,
+                    "rich_message": rich_message,
                     "message_thread_id": message_thread_id,
                     "reply_to_message_id": reply_to_message_id,
-                    "parse_mode": parse_mode,
+                    "fallback_parse_mode": fallback_parse_mode,
                 }
             )
-            return TelegramMessage(
-                chat_id=chat_id,
-                message_id=789,
-                message_thread_id=message_thread_id,
-            )
+            return True
 
         self.app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
-        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._safe_send_rich_message = fake_send_rich_message  # type: ignore[method-assign]
 
         self.app._send_run_result(active_run, "最终回复")
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("最终回复", str(sent[0]["text"]))
+        self.assertIn("最终回复", str(sent[0]["rich_message"]))
         self.assertEqual(active_run.preview_message_id, 456)
 
     def test_send_run_result_schedules_preview_delete_retry_when_rate_limited(self) -> None:
@@ -381,25 +373,22 @@ class AppMessagingTestCase(unittest.TestCase):
                 }
             )
 
-        def fake_send_message(
+        def fake_send_rich_message(
             chat_id: int,
-            text: str,
+            rich_message: dict[str, object],
             message_thread_id: int | None,
             reply_to_message_id: int | None = None,
-            parse_mode: str | None = None,
+            fallback_text: str = "",
+            fallback_parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
             user_id: int | None = None,
-        ) -> TelegramMessage:
-            sent.append(text)
-            return TelegramMessage(
-                chat_id=chat_id,
-                message_id=790,
-                message_thread_id=message_thread_id,
-            )
+        ) -> bool:
+            sent.append(str(rich_message))
+            return True
 
         self.app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
         self.app._schedule_delayed_preview_delete = fake_schedule_delayed_preview_delete  # type: ignore[method-assign]
-        self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        self.app._safe_send_rich_message = fake_send_rich_message  # type: ignore[method-assign]
 
         self.app._send_run_result(active_run, "最终回复")
 
@@ -575,24 +564,21 @@ class AppMessagingTestCase(unittest.TestCase):
         def fake_delete_message(**kwargs) -> None:
             calls.append(f"delete:{kwargs['message_id']}")
 
-        def fake_send_message(
+        def fake_send_rich_message(
             chat_id: int,
-            text: str,
+            rich_message: dict[str, object],
             message_thread_id: int | None,
             reply_to_message_id: int | None = None,
-            parse_mode: str | None = None,
+            fallback_text: str = "",
+            fallback_parse_mode: str | None = None,
             defer_on_rate_limit: bool = False,
             user_id: int | None = None,
-        ) -> TelegramMessage:
-            calls.append(str(text))
-            return TelegramMessage(
-                chat_id=chat_id,
-                message_id=800,
-                message_thread_id=message_thread_id,
-            )
+        ) -> bool:
+            calls.append(str(rich_message))
+            return True
 
         app.telegram.delete_message = fake_delete_message  # type: ignore[method-assign]
-        app._safe_send_message = fake_send_message  # type: ignore[method-assign]
+        app._safe_send_rich_message = fake_send_rich_message  # type: ignore[method-assign]
 
         with patch("teledex.app.time.monotonic", return_value=12.0):
             app._send_run_result(active_run, "最终回复", preview)
@@ -600,7 +586,7 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(calls[0], "delete:456")
         self.assertIn("最终回复", calls[1])
 
-    def test_send_run_result_splits_long_final_message_and_keeps_repo_file_links(self) -> None:
+    def test_send_run_result_uses_rich_message_and_keeps_repo_file_links(self) -> None:
         repo_dir = Path(self.temp_dir.name) / "repo"
         file_path = repo_dir / "src" / "demo" / "app.py"
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -652,6 +638,61 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.app.telegram.delete_message = lambda **kwargs: None  # type: ignore[method-assign]
 
+        def fake_send_rich_message(
+            chat_id: int,
+            rich_message: dict[str, object],
+            message_thread_id: int | None,
+            reply_to_message_id: int | None = None,
+            fallback_text: str = "",
+            fallback_parse_mode: str | None = None,
+            defer_on_rate_limit: bool = False,
+            user_id: int | None = None,
+            platform: str | None = None,
+        ) -> bool:
+            sent.append(
+                {
+                    "chat_id": chat_id,
+                    "rich_message": rich_message,
+                    "message_thread_id": message_thread_id,
+                    "reply_to_message_id": reply_to_message_id,
+                    "fallback_text": fallback_text,
+                    "fallback_parse_mode": fallback_parse_mode,
+                }
+            )
+            return True
+
+        self.app._safe_send_rich_message = fake_send_rich_message  # type: ignore[method-assign]
+
+        long_text = (
+            f"查看文件：[app.py]({file_path}#L1)\n\n"
+            + ("这是一段用于触发 Telegram 长消息分片的说明。\n" * 220)
+        )
+
+        self.app._send_run_result(active_run, long_text)
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn(
+            "[app.py](https://github.com/example/demo/blob/main/src/demo/app.py#L1)",
+            str(sent[0]["rich_message"]),
+        )
+        self.assertEqual(sent[0]["fallback_parse_mode"], "HTML")
+        self.assertNotIn("[Truncated for length]", str(sent[0]["rich_message"]))
+
+    def test_send_run_result_falls_back_to_html_when_rich_message_fails(self) -> None:
+        active_run = ActiveRun(
+            run_id=1,
+            session_id=1,
+            user_id=1,
+            chat_id=100,
+            message_thread_id=9,
+            prompt="任务",
+            preview_message_id=456,
+        )
+        sent: list[dict[str, object]] = []
+
+        self.app.telegram.delete_message = lambda **kwargs: None  # type: ignore[method-assign]
+        self.app._safe_send_rich_message = lambda **kwargs: False  # type: ignore[method-assign]
+
         def fake_send_message(
             chat_id: int,
             text: str,
@@ -667,33 +708,24 @@ class AppMessagingTestCase(unittest.TestCase):
                     "chat_id": chat_id,
                     "text": text,
                     "message_thread_id": message_thread_id,
-                    "reply_to_message_id": reply_to_message_id,
                     "parse_mode": parse_mode,
-                    "platform": platform,
+                    "defer_on_rate_limit": defer_on_rate_limit,
                 }
             )
             return TelegramMessage(
                 chat_id=chat_id,
-                message_id=789 + len(sent),
+                message_id=999,
                 message_thread_id=message_thread_id,
             )
 
         self.app._safe_send_message = fake_send_message  # type: ignore[method-assign]
 
-        long_text = (
-            f"查看文件：[app.py]({file_path}#L1)\n\n"
-            + ("这是一段用于触发 Telegram 长消息分片的说明。\n" * 220)
-        )
+        self.app._send_run_result(active_run, "最终 **回复**")
 
-        self.app._send_run_result(active_run, long_text)
-
-        self.assertGreater(len(sent), 1)
-        self.assertTrue(all(item["parse_mode"] == "HTML" for item in sent))
-        self.assertIn(
-            '<a href="https://github.com/example/demo/blob/main/src/demo/app.py#L1">app.py</a>',
-            str(sent[0]["text"]),
-        )
-        self.assertNotIn("[Truncated for length]", "".join(str(item["text"]) for item in sent))
+        self.assertEqual(len(sent), 1)
+        self.assertIn("最终 <b>回复</b>", str(sent[0]["text"]))
+        self.assertEqual(sent[0]["parse_mode"], "HTML")
+        self.assertTrue(sent[0]["defer_on_rate_limit"])
 
     def test_build_final_result_message_renders_repo_file_reference_as_github_link(self) -> None:
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -763,7 +795,9 @@ class AppMessagingTestCase(unittest.TestCase):
 
         self.assertIsNone(result)
         pending = self.app.storage.list_due_pending_telegram_messages(
-            due_before=(datetime.now(tz=UTC) + timedelta(minutes=1)).isoformat(timespec="seconds"),
+            due_before=(datetime.now(tz=UTC) + timedelta(minutes=1)).isoformat(
+                timespec="seconds"
+            ),
             limit=10,
         )
         self.assertEqual(len(pending), 1)
@@ -771,6 +805,39 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(pending[0].chat_id, 100)
         self.assertEqual(pending[0].text, "最终回复")
         self.assertEqual(pending[0].parse_mode, "HTML")
+
+    def test_safe_send_rich_message_can_schedule_retry_when_rate_limited(self) -> None:
+        def fake_send_rich_message(**kwargs) -> TelegramMessage:
+            raise TelegramRateLimitError("限流", retry_after_seconds=15)
+
+        self.app.telegram.send_rich_message = fake_send_rich_message  # type: ignore[method-assign]
+
+        handled = self.app._safe_send_rich_message(
+            chat_id=100,
+            rich_message={"markdown": "| A | B |\n|---|---|\n| 1 | 2 |"},
+            message_thread_id=9,
+            fallback_text="<b>fallback</b>",
+            fallback_parse_mode="HTML",
+            defer_on_rate_limit=True,
+            user_id=1,
+        )
+
+        self.assertTrue(handled)
+        pending = self.app.storage.list_due_pending_telegram_messages(
+            due_before=(datetime.now(tz=UTC) + timedelta(minutes=1)).isoformat(
+                timespec="seconds"
+            ),
+            limit=10,
+        )
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].text, "<b>fallback</b>")
+        self.assertEqual(pending[0].parse_mode, "HTML")
+        self.assertIsNotNone(pending[0].rich_message_json)
+        assert pending[0].rich_message_json is not None
+        self.assertEqual(
+            json.loads(pending[0].rich_message_json)["markdown"],
+            "| A | B |\n|---|---|\n| 1 | 2 |",
+        )
 
     def test_process_pending_telegram_messages_sends_due_message(self) -> None:
         sent: list[dict[str, object]] = []
@@ -800,6 +867,47 @@ class AppMessagingTestCase(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(str(sent[0]["text"]), "补发结果")
         self.assertIsNone(self.app.storage.get_next_pending_telegram_message_due_at())
+        row = self.app.storage._conn.execute(
+            "SELECT 1 FROM pending_telegram_messages WHERE id = ?",
+            (pending_id,),
+        ).fetchone()
+        self.assertIsNone(row)
+
+    def test_process_pending_telegram_messages_sends_due_rich_message(self) -> None:
+        sent: list[dict[str, object]] = []
+        pending_id = self.app.storage.enqueue_pending_telegram_message(
+            user_id=1,
+            chat_id=100,
+            text="<b>补发结果</b>",
+            message_thread_id=9,
+            reply_to_message_id=88,
+            parse_mode="HTML",
+            due_at=datetime.now(tz=UTC).isoformat(timespec="seconds"),
+            rich_message_json=json.dumps(
+                {"markdown": "| A | B |\n|---|---|\n| 1 | 2 |"},
+                ensure_ascii=False,
+            ),
+        )
+
+        def fake_send_rich_message(**kwargs) -> TelegramMessage:
+            sent.append(kwargs)
+            return TelegramMessage(
+                chat_id=int(kwargs["chat_id"]),
+                message_id=802,
+                message_thread_id=int(kwargs["message_thread_id"]),
+            )
+
+        self.app.telegram.send_rich_message = fake_send_rich_message  # type: ignore[method-assign]
+
+        processed = self.app._process_pending_telegram_messages_once()
+
+        self.assertTrue(processed)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(
+            sent[0]["rich_message"],
+            {"markdown": "| A | B |\n|---|---|\n| 1 | 2 |"},
+        )
+        self.assertEqual(sent[0]["reply_to_message_id"], 88)
         row = self.app.storage._conn.execute(
             "SELECT 1 FROM pending_telegram_messages WHERE id = ?",
             (pending_id,),
